@@ -1,0 +1,659 @@
+#!/usr/bin/env perl
+################################################################################
+#
+# influxdb-schema-updater
+#
+# Script to update InfluxDB databases, retention policies and continuous queries
+# according to the config files. Exits with 0 if and only if every required
+# update has been executed successfully.
+#
+# Written by Anselme Goetschmann ang@open.ch April 2018
+# Copyright (c) 2018 Open Systems AG, Switzerland
+# All Rights Reserved.
+#
+################################################################################
+
+use 5.010;
+use strict;
+use warnings;
+
+use InfluxDB::HTTP;
+
+use Getopt::Long;
+use Pod::Usage qw(pod2usage);
+use IPC::Run qw(run);
+use JSON::MaybeXS;
+use File::Slurper qw(read_text);
+use List::Util qw(sum0);
+
+
+sub main {
+    my $show_usage;
+    my $dryrun = 0;
+    my $diff = 0;
+    my $force = 0;
+    my $schema_dir = '/etc/influxdb/schema/';
+    my $url = 'http://localhost:8086';
+
+    GetOptions(
+        ("help"     => \$show_usage,
+         "dryrun"   => \$dryrun,
+         "diff"     => \$diff,
+         "force"    => \$force,
+         "config=s" => \$schema_dir,
+         "url=s"    => \$url)
+    );
+
+    if ($show_usage) {
+        pod2usage(-verbose => 1)
+    }
+
+    # schema configuration directory
+    if (! -d $schema_dir) {
+        pod2usage("The InfluxDB schema configuration directory $schema_dir does not exist");
+    }
+    $schema_dir =~ s/\/$//;
+
+    # influxdb client
+    $url =~ /^(?:(?<protocol>\w+):\/\/)?(?<host>\w+):(?<port>\d+)$/;
+    if ($+{protocol} && $+{protocol} ne 'http') {
+        pod2usage("Got $+{protocol} as protocol to reach InfluxDB, but only http is supported.");
+    }
+    if (!$+{host} || !$+{port}) {
+        pod2usage("The host and the port could not be extracted from the url $url");
+    }
+    my $influxdb_client = InfluxDB::HTTP->new(host => $+{host}, port => $+{port});
+    my $ping = $influxdb_client->ping();
+    die "Failed to reach InfluxDB at $url: $ping\n" if !$ping;
+
+    # get the schema updates from the configuration directory compared to what is in influxdb
+    my $updates = extract_updates($influxdb_client, $schema_dir, $dryrun, $force);
+
+    # only print the updates if we're in diff mode
+    if ($diff) {
+        print_diff($updates);
+        exit 0;
+    }
+
+    # apply the updates
+    my $unapplied_updates_count = apply_updates($updates, $influxdb_client);
+    exit ($unapplied_updates_count == 0 ? 0 : 1);
+}
+
+sub extract_updates {
+    my ($influxdb_client, $schema_dir, $dryrun, $force) = @_;
+
+    my $db_schemas_in_influxdb = load_db_schemas_in_influxdb($influxdb_client);
+    my $db_schemas_in_config = load_db_schemas_in_config($schema_dir);
+    my $updates = extract_database_updates($db_schemas_in_influxdb, $db_schemas_in_config, $dryrun, $force);
+
+    my $all_cqs_in_influxdb = load_all_cqs_in_influxdb($influxdb_client);
+    my $all_cqs_in_config = load_all_cqs_in_config($schema_dir);
+    my ($cq_deletions, $cq_updates_and_creations) = extract_continuous_query_updates($all_cqs_in_influxdb, $all_cqs_in_config, $dryrun, $force);
+    $updates = [@$cq_deletions, @$updates, @$cq_updates_and_creations]; # delete old stuff first
+
+    return $updates;
+}
+
+sub apply_updates {
+    my ($updates, $influxdb_client) = @_;
+
+    my %object_str = (db => 'database', rp => 'retention policy', cq => 'continuous query');
+    my %action_prefix = (delete => '[-]', update => '[~]', create => '[+]');
+
+    my $skipped_count = 0;
+    for my $update (@$updates) {
+        my $description = "$update->{action} $object_str{$update->{object}} $update->{name}" . ($update->{object} ne 'db' ? " on database $update->{db}" : '');
+        if ($update->{skip}) {
+            say "[!] skipped: $description";
+            $skipped_count += 1;
+            next;
+        }
+        say "$action_prefix{$update->{action}} $description";
+        query_influxql($influxdb_client, $update->{query})
+    }
+
+    return $skipped_count;
+}
+
+sub print_diff {
+    my ($updates) = @_;
+
+    for my $update (@$updates) {
+        print '-- ' if $update->{skip};
+        say $update->{query};
+    }
+}
+
+# Databases and Retention Policies ---------------------------------------------
+
+# returns an array of updates:
+# [
+#     {
+#         action => 'delete' | 'update' | 'create',
+#         object => 'db' | 'rp' | 'cq',
+#         db => <db_name>,
+#         name => <data_name>,
+#         query => <ifql_query>,
+#         skip => 0 | 1, # whether this change should be skipped
+#     },
+#     ...
+# ]
+sub extract_database_updates {
+    my ($db_schemas_in_influxdb, $db_schemas_in_config, $dryrun, $force) = @_;
+
+    my ($old_dbs, $eq_dbs, $new_dbs) = get_Ldifference_intersection_Rdifference([keys %{$db_schemas_in_influxdb}], [keys %{$db_schemas_in_config}]);
+
+    my %rp_updates;
+    for my $db (@$eq_dbs) {
+        my ($old, $updated, $new) = extract_retention_policy_updates($db, $db_schemas_in_influxdb->{$db}, $db_schemas_in_config->{$db}->{rps}, $dryrun, $force);
+        $rp_updates{old_rps}->{$db} = $old;
+        $rp_updates{updated_rps}->{$db} = $updated;
+        $rp_updates{new_rps}->{$db} = $new;
+    }
+
+    # array of updates in the order in which they should be applied
+    my @updates;
+    # old retention policies
+    for my $db (reverse sort keys %{$rp_updates{old_rps}}) {
+        push @updates, @{$rp_updates{old_rps}->{$db}};
+    }
+    # old databases
+    for my $db (reverse sort @$old_dbs){
+        push @updates, {
+            action => 'delete',
+            object => 'db',
+            db => $db,
+            name => $db,
+            query => "DROP DATABASE $db;",
+            skip => $dryrun || !$force,
+        };
+    }
+    # new databases
+    for my $db (sort @$new_dbs){
+        push @updates, {
+            action => 'create',
+            object => 'db',
+            db => $db,
+            name => $db,
+            query => $db_schemas_in_config->{$db}->{create_query},
+            skip => $dryrun,
+        };
+    }
+    # new retention policies
+    for my $db (sort keys %{$rp_updates{new_rps}}) {
+        push @updates, @{$rp_updates{new_rps}->{$db}};
+    }
+    # updated retention policies
+    for my $db (sort keys %{$rp_updates{updated_rps}}) {
+        push @updates, @{$rp_updates{updated_rps}->{$db}};
+    }
+
+    return \@updates;
+}
+
+sub extract_retention_policy_updates {
+    my ($db, $rps_in_influxdb, $rps_in_config, $dryrun, $force) = @_;
+
+    my ($old_rps, $eq_rps, $new_rps) = get_Ldifference_intersection_Rdifference([keys %{$rps_in_influxdb}], [keys %{$rps_in_config}]);
+
+    my @old_rps;
+    for my $rp (reverse sort @$old_rps) {
+        push @old_rps, {
+            action => 'delete',
+            object => 'rp',
+            db => $db,
+            name => $rp,
+            query => "DROP RETENTION POLICY \"$rp\" ON $db;",
+            skip => $dryrun || !$force,
+        };
+    }
+    my @updated_rps;
+    for my $rp (sort @$eq_rps) {
+        if (compare_rps($rps_in_influxdb->{$rp}, $rps_in_config->{$rp}) != 0) {
+            push @updated_rps, {
+                action => 'update',
+                object => 'rp',
+                db => $db,
+                name => $rp,
+                query => "ALTER RETENTION POLICY \"$rp\" ON $db DURATION $rps_in_config->{$rp}->{duration} REPLICATION 1 SHARD DURATION $rps_in_config->{$rp}->{shard_duration}" . ($rps_in_config->{$rp}->{default} ? ' DEFAULT;' : ';'),
+                skip => $dryrun,
+            };
+        }
+    }
+    my @new_rps;
+    for my $rp (sort @$new_rps) {
+        push @new_rps, {
+            action => 'create',
+            object => 'rp',
+            db => $db,
+            name => $rp,
+            query => "CREATE RETENTION POLICY \"$rp\" ON $db DURATION $rps_in_config->{$rp}->{duration} REPLICATION 1 SHARD DURATION $rps_in_config->{$rp}->{shard_duration}" . ($rps_in_config->{$rp}->{default} ? ' DEFAULT;' : ';'),
+            skip => $dryrun,
+        };
+    }
+
+    return (\@old_rps, \@updated_rps, \@new_rps);
+}
+
+sub compare_rps {
+    my ($rp1, $rp2) = @_;
+
+    return (to_sec($rp1->{duration}) != to_sec($rp2->{duration}))
+            || (to_sec($rp1->{shard_duration}) != to_sec($rp2->{shard_duration}))
+            || ($rp1->{default} xor $rp2->{default});
+}
+
+# Continuous Queries -----------------------------------------------------------
+
+sub extract_continuous_query_updates {
+    my ($all_cqs_in_influxdb, $all_cqs_in_config, $dryrun, $force) = @_;
+
+    my %dbs_union = map { $_ => 1 } (keys %$all_cqs_in_influxdb, keys %$all_cqs_in_config);
+    my @dbs = keys %dbs_union;
+
+    my @cq_deletions;
+    my @cq_updates_and_creations;
+    for my $db (sort @dbs) {
+        my $in_influxdb = {};
+        $in_influxdb = $all_cqs_in_influxdb->{$db} if exists $$all_cqs_in_influxdb{$db};
+        my $in_config = {};
+        $in_config = $all_cqs_in_config->{$db} if exists $$all_cqs_in_config{$db};
+
+        my ($old, $eq, $new) = get_Ldifference_intersection_Rdifference([keys %$in_influxdb], [keys %$in_config]);
+
+        for my $cq (sort @$old) {
+            push @cq_deletions, {
+                action => 'delete',
+                object => 'cq',
+                db => $db,
+                name => $cq,
+                query => "DROP CONTINUOUS QUERY $cq ON $db;",
+                skip => $dryrun || !$force,
+            };
+        }
+        for my $cq (sort @$eq) {
+            if (compare_cqs($in_influxdb->{$cq}, $in_config->{$cq}) != 0) {
+                push @cq_updates_and_creations, {
+                    action => 'update',
+                    object => 'cq',
+                    db => $db,
+                    name => $cq,
+                    query => "DROP CONTINUOUS QUERY $cq ON $db; $all_cqs_in_config->{$db}->{$cq};",
+                    skip => $dryrun,
+                };
+            }
+        }
+        for my $cq (sort @$new) {
+            push @cq_updates_and_creations, {
+                action => 'create',
+                object => 'cq',
+                db => $db,
+                name => $cq,
+                query => $all_cqs_in_config->{$db}->{$cq} . ';',
+                skip => $dryrun,
+            };
+        }
+    }
+
+    @cq_deletions = reverse @cq_deletions;
+
+    return (\@cq_deletions, \@cq_updates_and_creations);
+}
+
+sub compare_cqs {
+    my ($cq1, $cq2) = @_;
+    for my $cq ($cq1, $cq2) {
+        $cq =~ s/ //g;
+        $cq =~ s/;//g;
+        $cq =~ s/"//g;
+        $cq = lc $cq;
+    }
+    return $cq1 cmp $cq2;
+}
+
+
+# Data -------------------------------------------------------------------------
+
+# {
+#     <db> => {
+#         <rp> => {
+#             duration => ...,
+#             shard_duration => ...,
+#             default => ...,
+#         },
+#         ...
+#     }
+# }
+sub load_db_schemas_in_influxdb {
+    my ($influxdb_client) = @_;
+
+    my $query_result = query_influxql($influxdb_client, 'SHOW DATABASES');
+    my $dbs_in_influxdb = $query_result->{'results'}->[0]->{series}->[0]->{values};
+    my @dbs_in_influxdb = grep { $_ ne '_internal' }
+                          map { $_->[0] }
+                          @$dbs_in_influxdb;
+
+    my %db_schemas_in_influxdb;
+    for my $db (@dbs_in_influxdb) {
+        my $rp_query_res = query_influxql($influxdb_client, "SHOW RETENTION POLICIES ON $db");
+        $db_schemas_in_influxdb{$db} = {
+            map  { $_->[0] => {
+                    duration => $_->[1],
+                    shard_duration => $_->[2],
+                    default => $_->[4],
+                }
+            }
+            @{$rp_query_res->{results}->[0]->{series}->[0]->{values}}
+        };
+    }
+
+    return \%db_schemas_in_influxdb;
+}
+
+# {
+#     <db> => {
+#         create_query => '...',
+#         rps => {
+#             <rp> => {
+#                 duration => ...,
+#                 shard_duration => ...,
+#                 default => ...,
+#             },
+#             ...
+#         },
+#     },
+#     ...
+# }
+sub load_db_schemas_in_config {
+    my ($schema_dir) = @_;
+
+    my %dbs_struct;
+    my $db_files = get_schema_files_for_dir("$schema_dir/db");
+
+    for my $db_file (@$db_files) {
+        my $create_queries = parse_create_queries("$schema_dir/db/$db_file");
+
+        for my $db (keys %$create_queries) {
+            my $create_query = $create_queries->{$db};
+            my $rps = parse_retention_policies($db, $create_query);
+
+            $dbs_struct{$db} = {
+                create_query => $create_query,
+                rps => $rps,
+            };
+        }
+    }
+    return \%dbs_struct;
+}
+
+# {
+#     <db> => {
+#         <cq_name> => <cq_create_query>,
+#         ...
+#     },
+# }
+sub load_all_cqs_in_influxdb {
+    my ($influxdb_client) = @_;
+
+    my %all_cqs_in_influxdb;
+    my $cqs_query_res = query_influxql($influxdb_client, "SHOW CONTINUOUS QUERIES");
+    %all_cqs_in_influxdb = map { $_->{name} => { map { $_->[0] => $_->[1] } @{$_->{values}} } }
+                           @{$cqs_query_res->{results}->[0]->{series}};
+    return \%all_cqs_in_influxdb;
+}
+
+# {
+#     <db> => {
+#         <cq_name> => <cq_create_query>,
+#         ...
+#     },
+# }
+sub load_all_cqs_in_config {
+    my ($schema_dir) = @_;
+
+    my %all_cqs_in_config;
+    my $cq_files = get_schema_files_for_dir("$schema_dir/cq");
+    for my $cq_file (@$cq_files) {
+        my $cqs_in_file = parse_continuous_queries("$schema_dir/cq/$cq_file");
+        %all_cqs_in_config = (%all_cqs_in_config, %$cqs_in_file);
+    }
+    return \%all_cqs_in_config;
+}
+
+
+sub get_schema_files_for_dir {
+    my ($dir) = @_;
+    my @files = grep { $_ }
+                map  { /\/([\w.]+)$/; $1 }
+                grep { -f }
+                glob("$dir/*");
+    return \@files;
+}
+
+# Parsers ----------------------------------------------------------------------
+
+# parse a file possibly containing multiple database create queries (with their respective RPs)
+sub parse_create_queries {
+    my ($file_name) = @_;
+    my $file_content = read_text($file_name);
+
+    my %create_queries;
+    while ($file_content =~ /(create database (\w+)[\s\S]+?)(?=(create database)|\z)/ig) {
+        my ($create_query, $db) = ($1, $2);
+        $create_query =~ s/^\s+|\s+$//g;
+        $create_queries{$db} = $create_query;
+    }
+    if (! %create_queries) {
+        die "No create query was found in $file_name, there is probably something wrong with the regex";
+    }
+
+    return \%create_queries;
+}
+
+# parse RPs from something like:
+# CREATE DATABASE test WITH DURATION 260w REPLICATION 1 SHARD DURATION 12w NAME rp2;
+# CREATE RETENTION POLICY rp1 ON test DURATION 100d REPLICATION 1 SHARD DURATION 2w;
+sub parse_retention_policies {
+    my ($db, $db_create_query) = @_;
+
+    my $default_rp;
+    # first rp in the config
+    my %rps;
+    if ($db_create_query =~ /create database $db with duration ((?:\d+[smhdw])|(?:inf)) [\w ]*? shard duration (\d+[smhdw]) name "?([\w.]+)"?/ig) {
+        $rps{$3} = {
+            duration        => $1,
+            shard_duration  => $2,
+        };
+        $default_rp = $3;
+    }
+    else { # https://docs.influxdata.com/influxdb/v1.5/query_language/database_management/#retention-policy-management
+        $rps{'autogen'} = {
+            duration        => 'INF',
+            shard_duration  => '7d',
+        };
+        $default_rp = 'autogen';
+    }
+    # loop over the rest
+    my $at_least_one_rp = scalar %rps;
+    while ($db_create_query =~ /create retention policy "?([\w.]+)"? on $db duration ((?:\d+[smhdw])|(?:inf)) replication 1 shard duration (\d+[smhdw])( default)?/ig) {
+        $at_least_one_rp = 1;
+        $rps{$1} = {
+            duration        => $2,
+            shard_duration  => $3,
+        };
+        $default_rp = $1 if $4;
+    }
+    if (!$at_least_one_rp) {
+        die "No retention policy was matched for $db, there is probably something wrong with the regex!";
+    }
+    # drop rps if needed
+    while ($db_create_query =~ /drop retention policy "?([\w.]+)"? on "?$db"?/ig) {
+        delete $rps{$1};
+    }
+
+    # only take in account the last rp declared as default
+    if ($default_rp) {
+        $rps{$default_rp}->{default} = 1;
+    }
+
+    return \%rps;
+}
+
+# parse CQs from something like:
+# CREATE CONTINUOUS QUERY cq1 ON test RESAMPLE EVERY 5m FOR 10m BEGIN SELECT LAST(a) AS b, c INTO test.rp2.m FROM test.rp1.m GROUP BY time(5m) END;
+# CREATE CONTINUOUS QUERY cq2 ON test RESAMPLE EVERY 5m FOR 10m BEGIN SELECT MAX(a) AS b, c INTO test.rp2.m FROM test.rp1.m GROUP BY time(5m) END;
+sub parse_continuous_queries {
+    my ($filename) = @_;
+
+    my $file_content = read_text($filename);
+
+    my %cqs;
+    while ($file_content =~ /(create continuous query "?([\w.]+)"? on "?(\w+)"? [\s\S]+? end)/ig) { # some cq names contain '.'
+        $cqs{$3}->{$2} = $1;
+    }
+    return \%cqs;
+}
+
+
+# Helpers ----------------------------------------------------------------------
+
+# given two sets (arrays) of strings, returns the left difference, the intersection and the right difference
+sub get_Ldifference_intersection_Rdifference {
+    my ($l, $r) = @_;
+    my @l = sort @{$l};
+    my @r = sort @{$r};
+
+    my @ldiff;
+    my @inter;
+    my @rdiff;
+    while (@l || @r) {
+        if (!@r) {
+            push @ldiff, @l;
+            last;
+        }
+        elsif (!@l) {
+            push @rdiff, @r;
+            last;
+        }
+
+        my $rel = $l[0] cmp $r[0];
+
+        if ($rel < 0) {
+            push @ldiff, shift @l;
+        }
+        elsif ($rel == 0) {
+            push @inter, shift @l;
+            shift @r;
+        }
+        else { # $rel > 0
+            push @rdiff, shift @r;
+        }
+    }
+
+    return (\@ldiff, \@inter, \@rdiff);
+}
+
+# convert InfluxDB duration string to seconds
+sub to_sec {
+    my ($d) = @_;
+
+    # infinity is encoded as 0s in InfluxDB
+    return 0 if $d eq 'INF';
+
+    state $in_seconds = {
+        'w' => 60 * 60 * 24 * 7,
+        'd' => 60 * 60 * 24,
+        'h' => 60 * 60,
+        'm' => 60,
+        's' => 1,
+    };
+    my $s;
+    while ($d =~ /(\d+?)([smhdw])/g) {
+        $s += $1 * $in_seconds->{$2};
+    }
+
+    return $s;
+}
+
+sub query_influxql {
+    my ($influxdb_client, $ifql) = @_;
+    my $query = $influxdb_client->query($ifql);
+    die "The query \"$ifql\" failed.\n" if ! $query;
+    my $data = $query->data();
+    die "Error: \"$data->{results}->[0]->{error}\" when running InfluxQL query \"$ifql\"\n" if $data->{results}->[0]->{error};
+    return $data;
+}
+
+# ------------------------------------------------------------------------------
+
+main();
+
+# ------------------------------------------------------------------------------
+
+__END__
+
+=head1 NAME
+
+influxdb-schema-updater - Update InfluxDB databases, retention policies and continuous queries
+
+=head1 VERSION
+
+Version 0.01
+
+=head1 SYNOPSIS
+
+influxdb-schema-updater [--help] [--dryrun] [--diff] [--force] [--config <schema_location>] [--port <port>]
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<--help>
+
+Print a help message and exit.
+
+=item B<--dryrun>
+
+Print the changes which would be applied in normal mode.
+
+=item B<--diff>
+
+Print the InfluxQL queries instead of executing them.
+
+=item B<--force>
+
+Apply the changes which were prevented in normal mode.
+
+=item B<--config>
+
+The directory where the schema files are located. Default is /etc/influxdb/schema/.
+
+=item B<--url>
+
+The url where the InfluxDB HTTP API is reachable. Default is localhost:8086.
+
+=back
+
+=head1 DESCRIPTION
+
+B<This program> will read the config directory which should have the following
+structure:
+
+    db/
+        # contains one or more InfluxQL create queries for a database and its RPs
+        <db_file1>.ifql
+        <db_file2>.ifql
+        ...
+    cq/
+        # contains InfluxQL create queries for CQs
+        <cq_file1>.ifql
+        <cq_file2>.ifql
+        ...
+
+and compare the databases, retention policies (RPs) and continuous queries (CQs)
+to the ones in the InfluxDB instance reachable at <url>. If there is a
+difference, InfluxDB will be updated. The exit code is 0 if and only if no
+update was skipped.
+
+=cut
