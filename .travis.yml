@@ -17,5 +17,5 @@ before_install:
   - sudo apt-get install -y influxdb
 
 install:
-  - cpanm --verbose --installdeps --notest .
+  - cpanm --quiet --installdeps --notest .
   - prove -v t/
