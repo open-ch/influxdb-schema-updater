@@ -1,4 +1,4 @@
-# InfluxDB Schema Updater
+# InfluxDB Schema Updater ![build status](https://travis-ci.org/open-ch/influxdb-schema-updater.svg?branch=master)
 
 The InfluxDB schema updater is a small DevOps tool to manage the schema of an [InfluxDB](https://github.com/influxdata/influxdb) instance with a set of configuration files. 
 
