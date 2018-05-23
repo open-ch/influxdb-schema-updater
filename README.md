@@ -2,11 +2,11 @@
 
 The InfluxDB schema updater is a small DevOps tool to manage the schema of an [InfluxDB](https://github.com/influxdata/influxdb) instance with a set of configuration files. 
 
-# SYNOPSIS
+## SYNOPSIS
 
 `influxdb-schema-updater [--help] [--dryrun] [--diff] [--force] [--config <schema_location>] [--url <url>]`
 
-# OPTIONS
+## OPTIONS
 
 - **--help**
 
@@ -32,7 +32,7 @@ The InfluxDB schema updater is a small DevOps tool to manage the schema of an [I
 
     The url where the InfluxDB HTTP API is reachable. Default is localhost:8086.
 
-# DESCRIPTION
+## DESCRIPTION
 
 This tool compares the databases, retention policies (RPs) and continuous queries (CQs) found in the `<schema_location>` directory to the ones in the InfluxDB instance reachable at `<url>`. If there is a difference, InfluxDB will be updated. Some changes like deleting a database are skipped when the `--force` flag is not set.
 
