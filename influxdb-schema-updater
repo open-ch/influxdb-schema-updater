@@ -18,14 +18,11 @@ use strict;
 use warnings;
 
 use InfluxDB::HTTP;
-
 use Getopt::Long;
 use Pod::Usage qw(pod2usage);
 use IPC::Run qw(run);
 use JSON::MaybeXS;
 use File::Slurper qw(read_text);
-use List::Util qw(sum0);
-
 
 sub main {
     my $show_usage;
@@ -308,6 +305,7 @@ sub compare_cqs {
         $cq =~ s/;//g;
         $cq =~ s/"//g;
         $cq = lc $cq;
+        $cq =~ s/fill\(null\)//g; # since fill(null) doesn't change anything, influx doesn't store it
     }
     return $cq1 cmp $cq2;
 }
