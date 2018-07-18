@@ -85,6 +85,11 @@ sub test {
     run_updater($curdir, "$schemas_dir/test06", $port);
     is run_updater($curdir, "$schemas_dir/test06", $port, '--diff'), ''         => 'CQ is updated';
 
+    # check that fill(null) is ignored
+    run_updater($curdir, "$schemas_dir/test06.2", $port, '--force');
+    is run_updater($curdir, "$schemas_dir/test06.2", $port, '--diff'), ''       => 'fill(null) in CQ is ignored';
+    run_updater($curdir, "$schemas_dir/test06", $port, '--force'); # reset
+
     # remove a continuous query
     is run_updater($curdir, "$schemas_dir/test07", $port, '--diff'), "-- DROP CONTINUOUS QUERY cq2 ON test;\n"
                                                                                 => 'CQ removal is detected';

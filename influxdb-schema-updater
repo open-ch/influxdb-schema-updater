@@ -305,6 +305,7 @@ sub compare_cqs {
         $cq =~ s/;//g;
         $cq =~ s/"//g;
         $cq = lc $cq;
+        $cq =~ s/fill\(null\)//g; # since fill(null) doesn't change anything, influx doesn't store it
     }
     return $cq1 cmp $cq2;
 }
