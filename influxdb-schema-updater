@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 ################################################################################
 #
 # influxdb-schema-updater
@@ -17,7 +17,11 @@ use 5.010;
 use strict;
 use warnings;
 
+use lib '/opt/OSAGinfluxdb/lib';
+
 use InfluxDB::HTTP;
+use Log::Any qw($log);
+use Log::Any::OSAG;
 use Getopt::Long;
 use Pod::Usage qw(pod2usage);
 use IPC::Run qw(run);
@@ -29,8 +33,14 @@ sub main {
     my $dryrun = 0;
     my $diff = 0;
     my $force = 0;
-    my $schema_dir = '/etc/influxdb/schema/';
-    my $url = 'http://localhost:8086';
+    my $schema_dir = '/opt/OSAGinfluxdb/etc/schema/';
+    my $url = 'http://localhost:7755';
+
+    Log::Any::OSAG->configure(
+        level => 'info',
+        screen => 0,
+        syslog => 1,
+    );
 
     GetOptions(
         ("help"     => \$show_usage,
@@ -65,7 +75,6 @@ sub main {
 
     # get the schema updates from the configuration directory compared to what is in influxdb
     my $updates = extract_updates($influxdb_client, $schema_dir, $dryrun, $force);
-
     # only print the updates if we're in diff mode
     if ($diff) {
         print_diff($updates);
@@ -93,6 +102,8 @@ sub extract_updates {
 }
 
 sub apply_updates {
+    use Data::Dumper;
+
     my ($updates, $influxdb_client) = @_;
 
     my %object_str = (db => 'database', rp => 'retention policy', cq => 'continuous query');
@@ -107,7 +118,8 @@ sub apply_updates {
             next;
         }
         say "$action_prefix{$update->{action}} $description";
-        query_influxql($influxdb_client, $update->{query})
+        query_influxql($influxdb_client, $update->{query});
+        $log->info("$action_prefix{$update->{action}} $description");
     }
 
     return $skipped_count;
@@ -137,12 +149,16 @@ sub print_diff {
 #     ...
 # ]
 sub extract_database_updates {
+
     my ($db_schemas_in_influxdb, $db_schemas_in_config, $dryrun, $force) = @_;
 
     my ($old_dbs, $eq_dbs, $new_dbs) = get_Ldifference_intersection_Rdifference([keys %{$db_schemas_in_influxdb}], [keys %{$db_schemas_in_config}]);
 
     my %rp_updates;
-    for my $db (@$eq_dbs) {
+    my @eq_and_new;
+    push(@eq_and_new, @$eq_dbs, @$new_dbs);
+    #for my $db (@$eq_dbs) {
+    for my $db (@eq_and_new) {
         my ($old, $updated, $new) = extract_retention_policy_updates($db, $db_schemas_in_influxdb->{$db}, $db_schemas_in_config->{$db}->{rps}, $dryrun, $force);
         $rp_updates{old_rps}->{$db} = $old;
         $rp_updates{updated_rps}->{$db} = $updated;
@@ -156,6 +172,7 @@ sub extract_database_updates {
         push @updates, @{$rp_updates{old_rps}->{$db}};
     }
     # old databases
+    # will not delete them by default (skip => 1) or if dryrun=1. Will delete them if dryrun=0 and force=1
     for my $db (reverse sort @$old_dbs){
         push @updates, {
             action => 'delete',
@@ -349,6 +366,16 @@ sub load_db_schemas_in_influxdb {
     return \%db_schemas_in_influxdb;
 }
 
+
+# 
+# Iterates over all files found in the schema directory. For each file it parses the statements and adds the valid ones in a hash data structure.
+#
+# Arguments:
+#     $schema_dir string: the directory name where the config files are 
+#
+# Returns:
+#     a reference to a hash holding the parsed statements. This hash is structured as below.
+#
 # {
 #     <db> => {
 #         create_query => '...',
@@ -363,27 +390,149 @@ sub load_db_schemas_in_influxdb {
 #     },
 #     ...
 # }
+#
 sub load_db_schemas_in_config {
     my ($schema_dir) = @_;
 
-    my %dbs_struct;
+    my %parsed_statements;
     my $db_files = get_schema_files_for_dir("$schema_dir/db");
-
+    
     for my $db_file (@$db_files) {
-        my $create_queries = parse_create_queries("$schema_dir/db/$db_file");
-
-        for my $db (keys %$create_queries) {
-            my $create_query = $create_queries->{$db};
-            my $rps = parse_retention_policies($db, $create_query);
-
-            $dbs_struct{$db} = {
-                create_query => $create_query,
-                rps => $rps,
-            };
-        }
+        my $statements_in_file = read_text("$schema_dir/db/$db_file");
+        parse_statements_add_to_hash($statements_in_file, \%parsed_statements);
     }
-    return \%dbs_struct;
+    return \%parsed_statements;
 }
+
+#
+# Iterates over the lines of a config file, parses the valid statements and adds them to the given hash.
+# Valid statements are: 
+#    - Create database with optional retention policy defined
+#    - Create retention policy
+#    - Delete retention policy
+#
+# Arguments:
+#     $string_to_parse string: the contents of the config file (loaded as string)
+#     $parsed_statements reference: a reference to a hash. The function will populate it with the parsed statements.
+#
+# Returns:
+#     a reference to a hash holding the parsed statements to be executed on the database.
+#
+sub parse_statements_add_to_hash {
+    my ($string_to_parse, $parsed_statements) = @_;
+
+    # regex to capture a 'create database' statement with an optional retention policy definition
+    my $db_regex = qr/^(create \s database \s (\w+))           # a create db statement starting at the beginning of the line. Any valid word as db name. Captured group.
+		     (\s? with \s duration                     # optional statement to define a retention policy in the db creation statement
+		      \s ((?:\d+[smhdw])|(?:inf)) \s [\w ]*?   # captured policy duration as one or more numbers followed by a letter, or 'inf'
+		      \s shard \s duration \s "?(\d+[smhdw])"? # captured shard duration, as above
+		      \s name \s "?([\w.]+)"? )?               # captured policy name as one or more word letters or dots, optionally enclosed in double quotes.
+		     /xim;                                     # case insensitive, multiline (to make the anchors work)
+
+    # regex to capture a retention policy definition statement
+    my $rp_regex = qr/^create \s retention \s policy
+		     \s "?([\w.]+)"?                          # any string containing word chars or '.', optionally enclosed in double quotes
+		     \s on \s (\w+)
+		     \s duration \s ((?:\d+[smhdw])|(?:inf))  # policy duration: either one or more numbers followed by a letter in the brackets, or 'inf'. Capture only the enclosing group.
+		     \s replication \s 1 \s shard \s duration
+		     \s "?(\d+[smhdw])"?                      # shard duration: one or more numbers followed by a letter in the brackets, optionally enclosed in double quotes
+		     (\s default)?                            # default retention policy: optional 'default' value.
+		     /xim;                                    # case insensitive, multiline (to make the anchors work)
+
+    # regex to capture a retention policy deletion statement
+    my $rp_delete_regex = qr/^drop retention policy "?([\w.]+)"? on "?(\w+)"?/im;
+
+    # a line in the file can be a database creation or retention policy creation or retention policy deletion statement
+    my $integrated_regex = qr/$db_regex|$rp_regex|$rp_delete_regex/;
+
+    # parse each matching line in a loop
+    # TODO: give a warning when a line doesn't match any expected regex
+    while ($string_to_parse =~ /$integrated_regex/g) {
+	# capture groups from the regex
+	my $create_db_statement = $1;
+	my $db_name = $2;
+	my $inline_rp_statement = $3;
+	my $inline_rp_duration = $4;
+	my $inline_rp_shard_duration = $5;
+	my $inline_rp_name = $6;
+	my $rp_name = $7;
+	my $rp_db_name = $8;
+	my $rp_duration = $9;
+	my $rp_shard_duration = $10;
+	my $default_rp = $11 ? 1 : 0;
+	my $rp_name_to_drop = $12;
+	my $db_name_for_dropped_rp = $13;
+
+	# the line contains a 'create database' definition
+	if ($create_db_statement) {
+	    add_db_create_statement($parsed_statements, $create_db_statement . ';', $db_name);
+	    # there is a retention policy defined together with the db creation statement
+	    if ($inline_rp_statement) {
+		# flagged as the default policy
+		add_rp_create_statement($parsed_statements, $db_name, $inline_rp_name, $inline_rp_duration, $inline_rp_shard_duration, 1);
+	    }
+	}
+	# the line is a 'create retention policy' definition
+	elsif ($rp_name) {
+	    add_rp_create_statement($parsed_statements, $rp_db_name, $rp_name, $rp_duration, $rp_shard_duration, $default_rp);
+	}
+	elsif ($rp_name_to_drop) {
+	    delete $parsed_statements->{$db_name_for_dropped_rp}->{'rps'}->{$rp_name_to_drop};
+	}
+	# the line is a valid statement (matches the regex), but we don't account for it in the above if statements. Should not happen.
+	else {
+	    die "Should never reach this point, fix it by implementing a conditional to cover this case."
+	}
+    }
+    return $parsed_statements;
+}
+
+
+#
+# Adds the passed 'create database' statement in the given hash holding the parsed statements, using the db name as the key.
+# If the statement already exists in the hash it throws an error.
+#
+# Arguments:
+#     $parsed_statements reference: hash holding the parsed statements. The function will add the db creation statement to this hash.
+#     $create_statement string: the 'create database' statement to add
+#     $db_name string: the name of the database to use as the key in the hash
+#
+# Returns:
+#
+sub add_db_create_statement {
+    my ($parsed_statements, $create_statement, $db_name) = @_;
+
+    # there should be no 'create database' statement yet for this database
+    if (exists $parsed_statements->{$db_name}{create_query}) {
+        die "Create statement already defined for database $db_name. Fix the config file"; 
+    }
+
+    $parsed_statements->{$db_name}{create_query} = $create_statement;
+}
+
+
+#
+# Adds the passed 'create retention policy' statement in the given hash holding the parsed statements.
+#
+# Arguments:
+#     $parsed_statements reference: reference to a hash
+#     $db_name string: the name of the database to which the rp refers
+#     $rp_name string:
+#     $rp_duration string:
+#     $rp_shard_duration string:
+#     $rp_default boolean: whether this is the default policy
+#
+# Returns:
+#
+sub add_rp_create_statement {
+        my ($parsed_statements, $db_name, $rp_name, $rp_duration, $rp_shard_duration, $rp_default) = @_;
+        
+        $parsed_statements->{$db_name}{rps}{$rp_name} = {
+                duration => $rp_duration,
+                shard_duration => $rp_shard_duration,
+                default => $rp_default};
+}
+
 
 # {
 #     <db> => {
@@ -431,76 +580,9 @@ sub get_schema_files_for_dir {
 
 # Parsers ----------------------------------------------------------------------
 
-# parse a file possibly containing multiple database create queries (with their respective RPs)
-sub parse_create_queries {
-    my ($file_name) = @_;
-    my $file_content = read_text($file_name);
-
-    my %create_queries;
-    while ($file_content =~ /(create database (\w+)[\s\S]+?)(?=(create database)|\z)/ig) {
-        my ($create_query, $db) = ($1, $2);
-        $create_query =~ s/^\s+|\s+$//g;
-        $create_queries{$db} = $create_query;
-    }
-    if (! %create_queries) {
-        die "No create query was found in $file_name, there is probably something wrong with the regex";
-    }
-
-    return \%create_queries;
-}
-
-# parse RPs from something like:
-# CREATE DATABASE test WITH DURATION 260w REPLICATION 1 SHARD DURATION 12w NAME rp2;
-# CREATE RETENTION POLICY rp1 ON test DURATION 100d REPLICATION 1 SHARD DURATION 2w;
-sub parse_retention_policies {
-    my ($db, $db_create_query) = @_;
-
-    my $default_rp;
-    # first rp in the config
-    my %rps;
-    if ($db_create_query =~ /create database $db with duration ((?:\d+[smhdw])|(?:inf)) [\w ]*? shard duration (\d+[smhdw]) name "?([\w.]+)"?/ig) {
-        $rps{$3} = {
-            duration        => $1,
-            shard_duration  => $2,
-        };
-        $default_rp = $3;
-    }
-    else { # https://docs.influxdata.com/influxdb/v1.5/query_language/database_management/#retention-policy-management
-        $rps{'autogen'} = {
-            duration        => 'INF',
-            shard_duration  => '7d',
-        };
-        $default_rp = 'autogen';
-    }
-    # loop over the rest
-    my $at_least_one_rp = scalar %rps;
-    while ($db_create_query =~ /create retention policy "?([\w.]+)"? on $db duration ((?:\d+[smhdw])|(?:inf)) replication 1 shard duration (\d+[smhdw])( default)?/ig) {
-        $at_least_one_rp = 1;
-        $rps{$1} = {
-            duration        => $2,
-            shard_duration  => $3,
-        };
-        $default_rp = $1 if $4;
-    }
-    if (!$at_least_one_rp) {
-        die "No retention policy was matched for $db, there is probably something wrong with the regex!";
-    }
-    # drop rps if needed
-    while ($db_create_query =~ /drop retention policy "?([\w.]+)"? on "?$db"?/ig) {
-        delete $rps{$1};
-    }
-
-    # only take in account the last rp declared as default
-    if ($default_rp) {
-        $rps{$default_rp}->{default} = 1;
-    }
-
-    return \%rps;
-}
-
 # parse CQs from something like:
 # CREATE CONTINUOUS QUERY cq1 ON test RESAMPLE EVERY 5m FOR 10m BEGIN SELECT LAST(a) AS b, c INTO test.rp2.m FROM test.rp1.m GROUP BY time(5m) END;
-# CREATE CONTINUOUS QUERY cq2 ON test RESAMPLE EVERY 5m FOR 10m BEGIN SELECT MAX(a) AS b, c INTO test.rp2.m FROM test.rp1.m GROUP BY time(5m) END;
+# CREATE CONkINUOUS QUERY cq2 ON test RESAMPLE EVERY 5m FOR 10m BEGIN SELECT MAX(a) AS b, c INTO test.rp2.m FROM test.rp1.m GROUP BY time(5m) END;
 sub parse_continuous_queries {
     my ($filename) = @_;
 
