@@ -62,12 +62,9 @@ sub test {
     is run_updater($curdir, "$schemas_dir/test03", $port, '--diff'), ''         => 'RP is updated';
 
     # create a retention policy on the same line as the database
-    is run_updater($curdir, "$schemas_dir/test04", $port, '--diff'), "-- DROP RETENTION POLICY \"autogen\" ON test;\nCREATE RETENTION POLICY \"rp2\" ON test DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\n"
+    is run_updater($curdir, "$schemas_dir/test04", $port, '--diff'), "CREATE RETENTION POLICY \"rp2\" ON test DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\n"
                                                                                 => 'RP on same line as create database is detected';
-    run_updater($curdir, "$schemas_dir/test04", $port);
-    cmp_ok $? >> 8, '==', 1                                                     => 'Exit code 1 when some changes are not applied';
-    is run_updater($curdir, "$schemas_dir/test04", $port, '--diff'), "-- DROP RETENTION POLICY \"autogen\" ON test;\n"
-                                                                                => 'RP autogen is not deleted without --force';
+
     run_updater($curdir, "$schemas_dir/test04", $port, '--force');
     cmp_ok $? >> 8, '==', 0                                                     => 'Exit code 0 when InfluxDB is up to date';
     is run_updater($curdir, "$schemas_dir/test04", $port, '--diff'), ''         => 'RP deleted with --force';
@@ -96,14 +93,18 @@ sub test {
     run_updater($curdir, "$schemas_dir/test07", $port);
     is run_updater($curdir, "$schemas_dir/test07", $port, '--diff'), "-- DROP CONTINUOUS QUERY cq2 ON test;\n"
                                                                                 => 'CQ is not deleted without --force';
+    # don't execute a delete action be default - return exit code 1
+    run_updater($curdir, "$schemas_dir/test07", $port);
+    cmp_ok $? >> 8, '==', 1                                                     => 'Exit code 1 when some changes are not applied';
+
     run_updater($curdir, "$schemas_dir/test07", $port, '--force');
     is run_updater($curdir, "$schemas_dir/test07", $port, '--diff'), ''         => 'CQ is deleted with --force';
 
     # test the order of updates
-    is run_updater($curdir, "$schemas_dir/test08", $port, '--diff', '--force'), "DROP CONTINUOUS QUERY cq1 ON test;\nDROP DATABASE test;\nCREATE DATABASE test2 WITH DURATION 260w REPLICATION 1 SHARD DURATION 12w NAME rp2;\nCREATE RETENTION POLICY rp1 ON test2 DURATION 100d REPLICATION 1 SHARD DURATION 2w;\nCREATE CONTINUOUS QUERY cq1 ON test2 RESAMPLE EVERY 5m FOR 10m BEGIN SELECT LAST(a) AS b, c INTO test2.rp2.m FROM test2.rp1.m GROUP BY time(5m) END;\n"
+    is run_updater($curdir, "$schemas_dir/test08", $port, '--diff', '--force'), "DROP CONTINUOUS QUERY cq1 ON test;\nDROP DATABASE test;\nCREATE DATABASE test2;\nCREATE RETENTION POLICY \"rp1\" ON test2 DURATION 100d REPLICATION 1 SHARD DURATION 2w;\nCREATE RETENTION POLICY \"rp2\" ON test2 DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\nCREATE CONTINUOUS QUERY cq1 ON test2 RESAMPLE EVERY 5m FOR 10m BEGIN SELECT LAST(a) AS b, c INTO test2.rp2.m FROM test2.rp1.m GROUP BY time(5m) END;\n"
+
                                                                                 => 'Updates applied in the right order';
 
-    # remove database
     is run_updater($curdir, "$schemas_dir/test00", $port, '--diff'), "-- DROP CONTINUOUS QUERY cq1 ON test;\n-- DROP DATABASE test;\n"
                                                                                 => 'Old database is detected';
     run_updater($curdir, "$schemas_dir/test00", $port);
@@ -112,11 +113,42 @@ sub test {
     run_updater($curdir, "$schemas_dir/test00", $port, '--force');
     is run_updater($curdir, "$schemas_dir/test00", $port, '--diff'), ''         => 'Database is deleted with --force';
 
+    run_updater($curdir, "$schemas_dir/test10", $port, '--diff');
+    cmp_ok $? >> 8, '==', 255                                                   => 'Exit with error when a database is created a second time';
+
+    run_updater($curdir, "$schemas_dir/test02", $port);
+    is run_updater($curdir, "$schemas_dir/test02", $port, '--diff'), ''         => 'Running the updater a second time for the same config does nothing (regression LAKE-338)';
+    
+    clean_db_state($curdir, $schemas_dir, $port);
+    # create db and retention policy
+    run_updater($curdir, "$schemas_dir/test11", $port);
+    # try to delete the policy created above, should not be executed without --force
+    run_updater($curdir, "$schemas_dir/test12", $port);
+    is run_updater($curdir, "$schemas_dir/test12", $port, '--diff'), "-- DROP RETENTION POLICY \"rp11\" ON test11;\n"
+                                                                                => 'Retention policy is not deleted without --force';
 
     done_testing();
 
     kill 'KILL', $pid;
 }
+
+
+#
+# Deletes all databases and retention policies from InfluxDB, to get a clean state for a test.
+#
+# Arguments:
+#     $curdir string: the current directory from where the script is ran
+#     $schemas_dir string: the name of the directory where the config files are
+#     $port string: the port where InfluxDB is running
+#
+# Returns:
+#
+sub clean_db_state {
+    my ($curdir, $schemas_dir, $port) = @_;
+
+    run_updater($curdir, "$schemas_dir/test00", $port, '--force');
+}
+
 
 sub run_updater {
     my ($curdir, $schema_dir, $port, @flags) = @_;
@@ -149,7 +181,8 @@ reporting-disabled = true
 
 [meta]
   dir = "$tmpdir/meta"
-  retention-autocreate = true
+  # don't create the autogen policy
+  retention-autocreate = false
   logging-enabled = true
 
 [data]
