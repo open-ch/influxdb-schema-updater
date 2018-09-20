@@ -32,12 +32,6 @@ sub main {
     my $schema_dir = '/etc/influxdb/schema/';
     my $url = 'http://localhost:8086';
 
-    Log::Any::OSAG->configure(
-        level => 'info',
-        screen => 0,
-        syslog => 1,
-    );
-
     GetOptions(
         ("help"     => \$show_usage,
          "dryrun"   => \$dryrun,
