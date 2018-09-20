@@ -20,8 +20,6 @@ use warnings;
 use lib '/opt/OSAGinfluxdb/lib';
 
 use InfluxDB::HTTP;
-use Log::Any qw($log);
-use Log::Any::OSAG;
 use Getopt::Long;
 use Pod::Usage qw(pod2usage);
 use IPC::Run qw(run);
@@ -33,8 +31,8 @@ sub main {
     my $dryrun = 0;
     my $diff = 0;
     my $force = 0;
-    my $schema_dir = '/opt/OSAGinfluxdb/etc/schema/';
-    my $url = 'http://localhost:7755';
+    my $schema_dir = '/etc/influxdb/schema/';
+    my $url = 'http://localhost:8086';
 
     Log::Any::OSAG->configure(
         level => 'info',
@@ -102,7 +100,6 @@ sub extract_updates {
 }
 
 sub apply_updates {
-    use Data::Dumper;
 
     my ($updates, $influxdb_client) = @_;
 
@@ -119,7 +116,6 @@ sub apply_updates {
         }
         say "$action_prefix{$update->{action}} $description";
         query_influxql($influxdb_client, $update->{query});
-        $log->info("$action_prefix{$update->{action}} $description");
     }
 
     return $skipped_count;
@@ -157,7 +153,6 @@ sub extract_database_updates {
     my %rp_updates;
     my @eq_and_new;
     push(@eq_and_new, @$eq_dbs, @$new_dbs);
-    #for my $db (@$eq_dbs) {
     for my $db (@eq_and_new) {
         my ($old, $updated, $new) = extract_retention_policy_updates($db, $db_schemas_in_influxdb->{$db}, $db_schemas_in_config->{$db}->{rps}, $dryrun, $force);
         $rp_updates{old_rps}->{$db} = $old;
