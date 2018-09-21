@@ -148,11 +148,9 @@ sub extract_database_updates {
     my ($db_schemas_in_influxdb, $db_schemas_in_config, $dryrun, $force) = @_;
 
     my ($old_dbs, $eq_dbs, $new_dbs) = get_Ldifference_intersection_Rdifference([keys %{$db_schemas_in_influxdb}], [keys %{$db_schemas_in_config}]);
-
+    
     my %rp_updates;
-    my @eq_and_new;
-    push(@eq_and_new, @$eq_dbs, @$new_dbs);
-    for my $db (@eq_and_new) {
+    for my $db (@$eq_dbs, @$new_dbs) {
         my ($old, $updated, $new) = extract_retention_policy_updates($db, $db_schemas_in_influxdb->{$db}, $db_schemas_in_config->{$db}->{rps}, $dryrun, $force);
         $rp_updates{old_rps}->{$db} = $old;
         $rp_updates{updated_rps}->{$db} = $updated;
@@ -393,12 +391,15 @@ sub load_db_schemas_in_influxdb {
 sub load_db_schemas_in_config {
     my ($schema_dir) = @_;
 
+    # this will be populated with all statements parsed from the files
     my %parsed_statements;
     my $db_files = get_schema_files_for_dir("$schema_dir/db");
     
     for my $db_file (@$db_files) {
         my $statements_in_file = read_text("$schema_dir/db/$db_file");
-        parse_statements_add_to_hash($statements_in_file, \%parsed_statements);
+        my $parsed_statements_from_file = parse_statements($statements_in_file);
+        # add the statements from this file to the initial hash
+        %parsed_statements = (%parsed_statements, %$parsed_statements_from_file);
     }
     return \%parsed_statements;
 }
@@ -416,31 +417,35 @@ sub load_db_schemas_in_config {
 #     $parsed_statements reference: a reference to a hash. The function will populate it with the parsed statements.
 #
 # Returns:
-#     a reference to a hash holding the parsed statements to be executed on the database.
+#     a reference to a hash holding the parsed statements from the file.
 #
-sub parse_statements_add_to_hash {
-    my ($string_to_parse, $parsed_statements) = @_;
+sub parse_statements {
+    my ($string_to_parse) = @_;
+    my %parsed_statements;
 
     # captures a 'create database' statement with an optional retention policy definition
-    my $db_regex = qr/^(create \s database \s (\w+))   # a create db statement starting at the beginning of the line. Any valid word as db name. Captured group.
-		     (\s? with \s duration                     # optional statement to define a retention policy in the db creation statement
-		      \s ((?:\d+[smhdw])|(?:inf)) \s [\w ]*?   # captured policy duration as one or more numbers followed by a letter, or 'inf'
-		      \s shard \s duration \s "?(\d+[smhdw])"? # captured shard duration, as above
-		      \s name \s "?([\w.]+)"? )?               # captured policy name as one or more word letters or dots, optionally enclosed in double quotes.
-		     /xim;                                     # case insensitive, multiline (to make the anchors work)
+    my $db_regex = qr/^\s?(create \s database \s (\w+))           # a create db statement, optionally starting with a space. Any valid word as db name. Captured group.
+		             (\s? with \s duration                     # optional statement to define a retention policy in the db creation statement
+		              \s ((?:\d+[smhdw])|(?:inf)) \s [\w ]*?   # captured policy duration as one or more numbers followed by a letter, or 'inf'
+		              \s shard \s duration \s "?(\d+[smhdw])"? # captured shard duration, as above
+		              \s name \s "?([\w.]+)"? )?               # captured policy name as one or more word letters or dots, optionally enclosed in double quotes.
+		           /xim;                                       # case insensitive, multiline (to make the anchors work)
 
     # captures a 'create retention policy' definition statement
     my $rp_regex = qr/^create \s retention \s policy
-		     \s "?([\w.]+)"?                          # any string containing word chars or '.', optionally enclosed in double quotes
-		     \s on \s (\w+)
-		     \s duration \s ((?:\d+[smhdw])|(?:inf))  # policy duration: either one or more numbers followed by a letter in the brackets, or 'inf'. Capture only the enclosing group.
-		     \s replication \s 1 \s shard \s duration
-		     \s "?(\d+[smhdw])"?                      # shard duration: one or more numbers followed by a letter in the brackets, optionally enclosed in double quotes
-		     (\s default)?                            # default retention policy: optional 'default' value.
-		     /xim;                                    # case insensitive, multiline (to make the anchors work)
+		             \s "?([\w.]+)"?                          # any string containing word chars or '.', optionally enclosed in double quotes
+		             \s on \s (\w+)
+		             \s duration \s ((?:\d+[smhdw])|(?:inf))  # policy duration: either one or more numbers followed by a letter in the brackets, or 'inf'. Capture only the enclosing group.
+		             \s replication \s 1 \s shard \s duration
+		             \s "?(\d+[smhdw])"?                      # shard duration: one or more numbers followed by a letter in the brackets, optionally enclosed in double quotes
+		             (\s default)?                            # default retention policy: optional 'default' value.
+		           /xim;                                      # case insensitive, multiline (to make the anchors work)
 
     # a line in the file can be a database creation or retention policy creation
     my $integrated_regex = qr/$db_regex|$rp_regex/;
+
+    # strip multiple space characters to a single space
+    $string_to_parse =~ s/ +/ /g;
 
     # parse each matching line in a loop
     # TODO: give a warning when a line doesn't match any expected regex
@@ -457,34 +462,60 @@ sub parse_statements_add_to_hash {
         my $rp_duration = $9;
         my $rp_shard_duration = $10;
         my $default_rp = $11 ? 1 : 0;
-        my $rp_name_to_drop = $12;
-        my $db_name_for_dropped_rp = $13;
 
         # the line is a 'create database' statement...
         if ($create_db_statement) {
-            add_db_create_statement($parsed_statements, $create_db_statement . ';', $db_name);
+            check_if_db_statement_exists_and_die(\%parsed_statements, $db_name);
+            $parsed_statements{$db_name}{create_query} = $create_db_statement . ';';
             # ...and has a retention policy defined inline
             if ($inline_rp_statement) {
-            # flagged as the default policy
-            add_rp_create_statement($parsed_statements, $db_name, $inline_rp_name, $inline_rp_duration, $inline_rp_shard_duration, 1);
+                # flagged as the default policy (assume that the inline policy is the default)
+                $parsed_statements{$db_name}{rps}{$inline_rp_name} = {duration       => $inline_rp_duration,
+                                                                      shard_duration => $inline_rp_shard_duration,
+                                                                      default        => 1};
             }
         }
         # the line is a 'create retention policy' statement
         elsif ($rp_name) {
-            add_rp_create_statement($parsed_statements, $rp_db_name, $rp_name, $rp_duration, $rp_shard_duration, $default_rp);
+            $parsed_statements{$rp_db_name}{rps}{$rp_name} = {duration       => $rp_duration,
+                                                              shard_duration => $rp_shard_duration,
+                                                              default        => $default_rp}
         }
-        # the line is a valid statement (matches the regex), but we don't account for it in the above if statements.
-        else {
-            die "Should never reach this point, fix it by implementing a conditional to cover this case."
+        # the line is a comment
+        elsif ($comment) {
+            print("ignoring comment: $comment");
         }
+        else { 
+            die "error, should never reach this" 
+        }
+        
     }
-    return $parsed_statements;
+    return \%parsed_statements;
+}
+
+
+#
+# Checks if the db creation statement is already added in the parsed statements hash. If yes then it throws an exception.
+#
+#  Arguments:
+#      $parsed_statements reference: a reference to the hash containing the db statements
+#      $db_name string: 
+#  Returns:
+#      -
+#
+sub check_if_db_statement_exists_and_die {
+    my ($parsed_statements, $db_name) = @_;
+    
+    # there should be no 'create database' statement yet for this database
+    if (exists $parsed_statements->{$db_name}{create_query}) {
+        die "Create statement already defined for database $db_name. Fix the config file";
+    }
 }
 
 
 #
 # Adds the passed 'create database' statement in the given hash holding the parsed statements, using the db name as the key.
-# If the statement already exists in the hash it throws an error.
+# If the statement already exists in the hash then it throws an error.
 #
 # Arguments:
 #     $parsed_statements reference: hash holding the parsed statements. The function will add the db creation statement to this hash.
