@@ -364,11 +364,11 @@ sub load_db_schemas_in_influxdb {
 }
 
 
-# 
+#
 # Iterates over all files found in the schema directory. For each file it parses the statements and adds the valid ones in a hash data structure.
 #
 # Arguments:
-#     $schema_dir string: the directory name where the config files are 
+#     $schema_dir string: the directory name where the config files are
 #
 # Returns:
 #     a reference to a hash holding the parsed statements. This hash is structured as below.
@@ -398,6 +398,7 @@ sub load_db_schemas_in_config {
     for my $db_file (@$db_files) {
         my $statements_in_file = read_text("$schema_dir/db/$db_file");
         my $parsed_statements_from_file = parse_statements($statements_in_file);
+        
         # add the statements from this file to the initial hash
         %parsed_statements = (%parsed_statements, %$parsed_statements_from_file);
     }
@@ -407,10 +408,9 @@ sub load_db_schemas_in_config {
 
 #
 # Iterates over the lines of a config file, parses the valid statements and adds them to the given hash.
-# Valid statements are: 
+# Valid statements are:
 #    - Create database with optional retention policy defined
 #    - Create retention policy
-#    - Delete retention policy
 #
 # Arguments:
 #     $string_to_parse string: the contents of the config file (loaded as string)
@@ -481,10 +481,6 @@ sub parse_statements {
                                                               shard_duration => $rp_shard_duration,
                                                               default        => $default_rp}
         }
-        # the line is a comment
-        elsif ($comment) {
-            print("ignoring comment: $comment");
-        }
         else { 
             die "error, should never reach this" 
         }
@@ -510,52 +506,6 @@ sub check_if_db_statement_exists_and_die {
     if (exists $parsed_statements->{$db_name}{create_query}) {
         die "Create statement already defined for database $db_name. Fix the config file";
     }
-}
-
-
-#
-# Adds the passed 'create database' statement in the given hash holding the parsed statements, using the db name as the key.
-# If the statement already exists in the hash then it throws an error.
-#
-# Arguments:
-#     $parsed_statements reference: hash holding the parsed statements. The function will add the db creation statement to this hash.
-#     $create_statement string: the 'create database' statement to add
-#     $db_name string: the name of the database to use as the key in the hash
-#
-# Returns:
-#
-sub add_db_create_statement {
-    my ($parsed_statements, $create_statement, $db_name) = @_;
-
-    # there should be no 'create database' statement yet for this database
-    if (exists $parsed_statements->{$db_name}{create_query}) {
-        die "Create statement already defined for database $db_name. Fix the config file"; 
-    }
-
-    $parsed_statements->{$db_name}{create_query} = $create_statement;
-}
-
-
-#
-# Adds the passed 'create retention policy' statement in the given hash holding the parsed statements.
-#
-# Arguments:
-#     $parsed_statements reference: reference to a hash
-#     $db_name string: the name of the database to which the rp refers
-#     $rp_name string:
-#     $rp_duration string:
-#     $rp_shard_duration string:
-#     $rp_default boolean: whether this is the default policy
-#
-# Returns:
-#
-sub add_rp_create_statement {
-        my ($parsed_statements, $db_name, $rp_name, $rp_duration, $rp_shard_duration, $rp_default) = @_;
-        
-        $parsed_statements->{$db_name}{rps}{$rp_name} = {
-                duration => $rp_duration,
-                shard_duration => $rp_shard_duration,
-                default => $rp_default};
 }
 
 

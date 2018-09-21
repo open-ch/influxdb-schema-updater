@@ -125,10 +125,27 @@ sub test {
                                                                                 => 'Multiple spaces are stripped to a single space';
 
     is run_updater($curdir, "$schemas_dir/test12", $port, '--diff'), ''         => 'Comments are ignored';
-
+    
     done_testing();
 
     kill 'KILL', $pid;
+}
+
+
+#
+# Deletes all databases and retention policies from InfluxDB, to get a clean state for a test.
+#
+# Arguments:
+#     $curdir string: the current directory from where the script is ran
+#     $schemas_dir string: the name of the directory where the config files are
+#     $port string: the port where InfluxDB is running
+#
+# Returns:
+#
+sub clean_db_state {
+    my ($curdir, $schemas_dir, $port) = @_;
+
+    run_updater($curdir, "$schemas_dir/test00", $port, '--force');
 }
 
 
