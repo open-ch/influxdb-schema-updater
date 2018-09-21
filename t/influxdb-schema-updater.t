@@ -119,14 +119,6 @@ sub test {
     run_updater($curdir, "$schemas_dir/test02", $port);
     is run_updater($curdir, "$schemas_dir/test02", $port, '--diff'), ''         => 'Running the updater a second time for the same config does nothing (regression LAKE-338)';
     
-    clean_db_state($curdir, $schemas_dir, $port);
-    # create db and retention policy
-    run_updater($curdir, "$schemas_dir/test11", $port);
-    # try to delete the policy created above, should not be executed without --force
-    run_updater($curdir, "$schemas_dir/test12", $port);
-    is run_updater($curdir, "$schemas_dir/test12", $port, '--diff'), "-- DROP RETENTION POLICY \"rp11\" ON test11;\n"
-                                                                                => 'Retention policy is not deleted without --force';
-
     done_testing();
 
     kill 'KILL', $pid;

@@ -26,6 +26,7 @@ use IPC::Run qw(run);
 use JSON::MaybeXS;
 use File::Slurper qw(read_text);
 
+
 sub main {
     my $show_usage;
     my $dryrun = 0;
@@ -33,12 +34,6 @@ sub main {
     my $force = 0;
     my $schema_dir = '/etc/influxdb/schema/';
     my $url = 'http://localhost:8086';
-
-    Log::Any::OSAG->configure(
-        level => 'info',
-        screen => 0,
-        syslog => 1,
-    );
 
     GetOptions(
         ("help"     => \$show_usage,
@@ -84,6 +79,7 @@ sub main {
     exit ($unapplied_updates_count == 0 ? 0 : 1);
 }
 
+
 sub extract_updates {
     my ($influxdb_client, $schema_dir, $dryrun, $force) = @_;
 
@@ -98,6 +94,7 @@ sub extract_updates {
 
     return $updates;
 }
+
 
 sub apply_updates {
 
@@ -121,6 +118,7 @@ sub apply_updates {
     return $skipped_count;
 }
 
+
 sub print_diff {
     my ($updates) = @_;
 
@@ -129,6 +127,7 @@ sub print_diff {
         say $update->{query};
     }
 }
+
 
 # Databases and Retention Policies ---------------------------------------------
 
@@ -201,6 +200,7 @@ sub extract_database_updates {
     return \@updates;
 }
 
+
 sub extract_retention_policy_updates {
     my ($db, $rps_in_influxdb, $rps_in_config, $dryrun, $force) = @_;
 
@@ -245,6 +245,7 @@ sub extract_retention_policy_updates {
     return (\@old_rps, \@updated_rps, \@new_rps);
 }
 
+
 sub compare_rps {
     my ($rp1, $rp2) = @_;
 
@@ -253,7 +254,9 @@ sub compare_rps {
             || ($rp1->{default} xor $rp2->{default});
 }
 
+
 # Continuous Queries -----------------------------------------------------------
+
 
 sub extract_continuous_query_updates {
     my ($all_cqs_in_influxdb, $all_cqs_in_config, $dryrun, $force) = @_;
@@ -309,6 +312,7 @@ sub extract_continuous_query_updates {
 
     return (\@cq_deletions, \@cq_updates_and_creations);
 }
+
 
 sub compare_cqs {
     my ($cq1, $cq2) = @_;
@@ -399,6 +403,7 @@ sub load_db_schemas_in_config {
     return \%parsed_statements;
 }
 
+
 #
 # Iterates over the lines of a config file, parses the valid statements and adds them to the given hash.
 # Valid statements are: 
@@ -416,15 +421,15 @@ sub load_db_schemas_in_config {
 sub parse_statements_add_to_hash {
     my ($string_to_parse, $parsed_statements) = @_;
 
-    # regex to capture a 'create database' statement with an optional retention policy definition
-    my $db_regex = qr/^(create \s database \s (\w+))           # a create db statement starting at the beginning of the line. Any valid word as db name. Captured group.
+    # captures a 'create database' statement with an optional retention policy definition
+    my $db_regex = qr/^(create \s database \s (\w+))   # a create db statement starting at the beginning of the line. Any valid word as db name. Captured group.
 		     (\s? with \s duration                     # optional statement to define a retention policy in the db creation statement
 		      \s ((?:\d+[smhdw])|(?:inf)) \s [\w ]*?   # captured policy duration as one or more numbers followed by a letter, or 'inf'
 		      \s shard \s duration \s "?(\d+[smhdw])"? # captured shard duration, as above
 		      \s name \s "?([\w.]+)"? )?               # captured policy name as one or more word letters or dots, optionally enclosed in double quotes.
 		     /xim;                                     # case insensitive, multiline (to make the anchors work)
 
-    # regex to capture a retention policy definition statement
+    # captures a 'create retention policy' definition statement
     my $rp_regex = qr/^create \s retention \s policy
 		     \s "?([\w.]+)"?                          # any string containing word chars or '.', optionally enclosed in double quotes
 		     \s on \s (\w+)
@@ -434,50 +439,44 @@ sub parse_statements_add_to_hash {
 		     (\s default)?                            # default retention policy: optional 'default' value.
 		     /xim;                                    # case insensitive, multiline (to make the anchors work)
 
-    # regex to capture a retention policy deletion statement
-    my $rp_delete_regex = qr/^drop retention policy "?([\w.]+)"? on "?(\w+)"?/im;
-
-    # a line in the file can be a database creation or retention policy creation or retention policy deletion statement
-    my $integrated_regex = qr/$db_regex|$rp_regex|$rp_delete_regex/;
+    # a line in the file can be a database creation or retention policy creation
+    my $integrated_regex = qr/$db_regex|$rp_regex/;
 
     # parse each matching line in a loop
     # TODO: give a warning when a line doesn't match any expected regex
     while ($string_to_parse =~ /$integrated_regex/g) {
-	# capture groups from the regex
-	my $create_db_statement = $1;
-	my $db_name = $2;
-	my $inline_rp_statement = $3;
-	my $inline_rp_duration = $4;
-	my $inline_rp_shard_duration = $5;
-	my $inline_rp_name = $6;
-	my $rp_name = $7;
-	my $rp_db_name = $8;
-	my $rp_duration = $9;
-	my $rp_shard_duration = $10;
-	my $default_rp = $11 ? 1 : 0;
-	my $rp_name_to_drop = $12;
-	my $db_name_for_dropped_rp = $13;
+        # capture groups from the regex
+        my $create_db_statement = $1;
+        my $db_name = $2;
+        my $inline_rp_statement = $3;
+        my $inline_rp_duration = $4;
+        my $inline_rp_shard_duration = $5;
+        my $inline_rp_name = $6;
+        my $rp_name = $7;
+        my $rp_db_name = $8;
+        my $rp_duration = $9;
+        my $rp_shard_duration = $10;
+        my $default_rp = $11 ? 1 : 0;
+        my $rp_name_to_drop = $12;
+        my $db_name_for_dropped_rp = $13;
 
-	# the line contains a 'create database' definition
-	if ($create_db_statement) {
-	    add_db_create_statement($parsed_statements, $create_db_statement . ';', $db_name);
-	    # there is a retention policy defined together with the db creation statement
-	    if ($inline_rp_statement) {
-		# flagged as the default policy
-		add_rp_create_statement($parsed_statements, $db_name, $inline_rp_name, $inline_rp_duration, $inline_rp_shard_duration, 1);
-	    }
-	}
-	# the line is a 'create retention policy' definition
-	elsif ($rp_name) {
-	    add_rp_create_statement($parsed_statements, $rp_db_name, $rp_name, $rp_duration, $rp_shard_duration, $default_rp);
-	}
-	elsif ($rp_name_to_drop) {
-	    delete $parsed_statements->{$db_name_for_dropped_rp}->{'rps'}->{$rp_name_to_drop};
-	}
-	# the line is a valid statement (matches the regex), but we don't account for it in the above if statements. Should not happen.
-	else {
-	    die "Should never reach this point, fix it by implementing a conditional to cover this case."
-	}
+        # the line is a 'create database' statement...
+        if ($create_db_statement) {
+            add_db_create_statement($parsed_statements, $create_db_statement . ';', $db_name);
+            # ...and has a retention policy defined inline
+            if ($inline_rp_statement) {
+            # flagged as the default policy
+            add_rp_create_statement($parsed_statements, $db_name, $inline_rp_name, $inline_rp_duration, $inline_rp_shard_duration, 1);
+            }
+        }
+        # the line is a 'create retention policy' statement
+        elsif ($rp_name) {
+            add_rp_create_statement($parsed_statements, $rp_db_name, $rp_name, $rp_duration, $rp_shard_duration, $default_rp);
+        }
+        # the line is a valid statement (matches the regex), but we don't account for it in the above if statements.
+        else {
+            die "Should never reach this point, fix it by implementing a conditional to cover this case."
+        }
     }
     return $parsed_statements;
 }
