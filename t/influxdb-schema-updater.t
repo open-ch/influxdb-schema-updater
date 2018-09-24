@@ -12,13 +12,14 @@ use IPC::Run qw(run);
 use File::Spec;
 use File::Basename;
 
-sub test {
-    my $curdir = get_directory_of_this_file();
-    my $schemas_dir = "$curdir/data";
+my $port = 17755;
+my $curdir = get_directory_of_this_file();
+my $schemas_dir = "$curdir/data";
 
+
+sub test {
     my $tmpdir_handle = File::Temp->newdir(CLEANUP => 1);
     my $tmpdir = $tmpdir_handle->dirname();
-    my $port = 17755;
 
     my $conf = get_test_conf($tmpdir, $port);
     write_text("$tmpdir/influx.conf", $conf);
@@ -114,18 +115,13 @@ sub test {
 
     # Exit with error when a database is created a second time
     run_updater($curdir, "$schemas_dir/test10", $port, 255, '--diff');
-
-    run_updater($curdir, "$schemas_dir/test02", $port, 0);
-    is run_updater($curdir, "$schemas_dir/test02", $port, 0, '--diff'), ''         => 'Running the updater a second time for the same config does nothing (regression LAKE-338)';
   
-    # clean db state first
-    run_updater($curdir, "$schemas_dir/test00", $port, 0, '--force');
-    is run_updater($curdir, "$schemas_dir/test11", $port, 0, '--diff'), "CREATE DATABASE test;\n"
-                                                                                => 'Multiple spaces are stripped to a single space';
-
     is run_updater($curdir, "$schemas_dir/test12", $port, 0, '--diff'), ''         => 'Comments are ignored';
 
     is run_updater($curdir, "$schemas_dir/test13", $port, 0, '--diff'), "CREATE DATABASE test1;\nCREATE DATABASE test2;\nCREATE DATABASE test3;\n"      => 'Multiple config files are handled properly';
+ 
+    run_updater($curdir, "$schemas_dir/test02", $port, 0);
+    is run_updater($curdir, "$schemas_dir/test02", $port, 0, '--diff'), ''         => 'Running the updater a second time for the same config does nothing (regression LAKE-338)';
     
     done_testing();
 

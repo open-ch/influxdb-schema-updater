@@ -421,25 +421,30 @@ sub load_db_schemas_in_config {
 #
 sub parse_statements {
     my ($string_to_parse) = @_;
+    my @splitted_lines = split "\n", $string_to_parse;
     my %parsed_statements;
 
     # captures a 'create database' statement with an optional retention policy definition
-    my $db_regex = qr/^\s?(create \s database \s (\w+))           # a create db statement, optionally starting with a space. Any valid word as db name. Captured group.
-		             (\s? with \s duration                     # optional statement to define a retention policy in the db creation statement
-		              \s ((?:\d+[smhdw])|(?:inf)) \s [\w ]*?   # captured policy duration as one or more numbers followed by a letter, or 'inf'
-		              \s shard \s duration \s "?(\d+[smhdw])"? # captured shard duration, as above
-		              \s name \s "?([\w.]+)"? )?               # captured policy name as one or more word letters or dots, optionally enclosed in double quotes.
-		           /xim;                                       # case insensitive, multiline (to make the anchors work)
+    my $db_regex = qr/^\s*(create \s+ database \s+ (\w+))              # a create db statement, optionally starting with a space. Any valid word as db name. Captured group.
+                     (
+		                 \s+ with \s+ duration                         # optional statement to define a retention policy in the db creation statement
+		                 \s+ ((?:\d+[smhdw])|(?:inf)) \s+ [\w ]*?      # captured policy duration as one or more numbers followed by a letter, or 'inf'
+		                 \s+ shard \s+ duration \s+ "?(\d+[smhdw])"?   # captured shard duration, as above
+		                 \s+ name \s+ "?([\w.]+)"?                     # captured policy name as one or more word letters or dots, optionally enclosed in double quotes.
+                     )?
+                     \s*;?\s*$                                         # end of line
+		           /xim;                                               # case insensitive, multiline (to make the anchors work)
 
     # captures a 'create retention policy' definition statement
-    my $rp_regex = qr/^create \s retention \s policy
-		             \s "?([\w.]+)"?                          # any string containing word chars or '.', optionally enclosed in double quotes
-		             \s on \s (\w+)
-		             \s duration \s ((?:\d+[smhdw])|(?:inf))  # policy duration: either one or more numbers followed by a letter in the brackets, or 'inf'. Capture only the enclosing group.
-		             \s replication \s 1 \s shard \s duration
-		             \s "?(\d+[smhdw])"?                      # shard duration: one or more numbers followed by a letter in the brackets, optionally enclosed in double quotes
-		             (\s default)?                            # default retention policy: optional 'default' value.
-		           /xim;                                      # case insensitive, multiline (to make the anchors work)
+    my $rp_regex = qr/^\s*create \s+ retention \s+ policy
+		             \s+ "?([\w.]+)"?                               # any string containing word chars or '.', optionally enclosed in double quotes
+		             \s+ on \s+ (\w+)
+		             \s+ duration \s+ ((?:\d+[smhdw])|(?:inf))      # policy duration: either one or more numbers followed by a letter in the brackets, or 'inf'. Capture only the enclosing group.
+		             \s+ replication \s+ \d+ \s+ shard \s+ duration # TODO: capture replication
+		             \s+ "?(\d+[smhdw])"?                           # shard duration: one or more numbers followed by a letter in the brackets, optionally enclosed in double quotes
+		             (\s+ default)?                                 # default retention policy: optional 'default' value.
+                     \s*;?\s*$                                      # end of line
+		           /xim;                                            # case insensitive, multiline (to make the anchors work)
 
     # a line in the file can be a database creation or retention policy creation
     my $integrated_regex = qr/$db_regex|$rp_regex/;
@@ -448,43 +453,49 @@ sub parse_statements {
     $string_to_parse =~ s/ +/ /g;
 
     # parse each matching line in a loop
-    # TODO: give a warning when a line doesn't match any expected regex
-    while ($string_to_parse =~ /$integrated_regex/g) {
-        # capture groups from the regex
-        my $create_db_statement = $1;
-        my $db_name = $2;
-        my $inline_rp_statement = $3;
-        my $inline_rp_duration = $4;
-        my $inline_rp_shard_duration = $5;
-        my $inline_rp_name = $6;
-        my $rp_name = $7;
-        my $rp_db_name = $8;
-        my $rp_duration = $9;
-        my $rp_shard_duration = $10;
-        my $default_rp = $11 ? 1 : 0;
+    for my $line (@splitted_lines) {
+        # ignore empty and commented lines
+        next if $line =~ /^\s*(#.*)?$/;
+        
+        if ($line =~ /$integrated_regex/) {
+            # capture groups from the regex
+            my $create_db_statement = $1;
+            my $db_name = $2;
+            my $inline_rp_statement = $3;
+            my $inline_rp_duration = $4;
+            my $inline_rp_shard_duration = $5;
+            my $inline_rp_name = $6;
+            my $rp_name = $7;
+            my $rp_db_name = $8;
+            my $rp_duration = $9;
+            my $rp_shard_duration = $10;
+            my $default_rp = $11 ? 1 : 0;
 
-        # the line is a 'create database' statement...
-        if ($create_db_statement) {
-            check_if_db_statement_exists_and_die(\%parsed_statements, $db_name);
-            $parsed_statements{$db_name}{create_query} = $create_db_statement . ';';
-            # ...and has a retention policy defined inline
-            if ($inline_rp_statement) {
-                # flagged as the default policy (assume that the inline policy is the default)
-                $parsed_statements{$db_name}{rps}{$inline_rp_name} = {duration       => $inline_rp_duration,
-                                                                      shard_duration => $inline_rp_shard_duration,
-                                                                      default        => 1};
+            # the line is a 'create database' statement...
+            if ($create_db_statement) {
+                check_if_db_statement_exists_and_die(\%parsed_statements, $db_name);
+                $parsed_statements{$db_name}{create_query} = $create_db_statement . ';';
+                # ...and has a retention policy defined inline
+                if ($inline_rp_statement) {
+                    # flagged as the default policy (assume that the inline policy is the default)
+                    $parsed_statements{$db_name}{rps}{$inline_rp_name} = {duration       => $inline_rp_duration,
+                                                                          shard_duration => $inline_rp_shard_duration,
+                                                                          default        => 1};
+                }
+            }
+            # the line is a 'create retention policy' statement
+            elsif ($rp_name) {
+                $parsed_statements{$rp_db_name}{rps}{$rp_name} = {duration       => $rp_duration,
+                                                                  shard_duration => $rp_shard_duration,
+                                                                  default        => $default_rp}
+            }
+            else {
+                die "error, should never reach this"
             }
         }
-        # the line is a 'create retention policy' statement
-        elsif ($rp_name) {
-            $parsed_statements{$rp_db_name}{rps}{$rp_name} = {duration       => $rp_duration,
-                                                              shard_duration => $rp_shard_duration,
-                                                              default        => $default_rp}
+        else {
+            die "could not parse input: $line";
         }
-        else { 
-            die "error, should never reach this" 
-        }
-        
     }
     return \%parsed_statements;
 }
