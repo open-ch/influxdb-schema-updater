@@ -125,6 +125,8 @@ sub test {
                                                                                 => 'Multiple spaces are stripped to a single space';
 
     is run_updater($curdir, "$schemas_dir/test12", $port, '--diff'), ''         => 'Comments are ignored';
+
+    is run_updater($curdir, "$schemas_dir/test13", $port, '--diff'), "CREATE DATABASE test1;\nCREATE DATABASE test2;\nCREATE DATABASE test3;\n"      => 'Multiple config files are handled properly';
     
     done_testing();
 
