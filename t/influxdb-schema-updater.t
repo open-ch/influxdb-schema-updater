@@ -16,28 +16,16 @@ my $port = 17755;
 my $curdir = get_directory_of_this_file();
 my $schemas_dir = "$curdir/data";
 
+# check if influxd is found before forking
+eval {
+    run_cmd('influxd', 'version');
+};
+plan(skip_all => 'influxd not found in PATH') if $@;
+
 
 sub test {
-    my $tmpdir_handle = File::Temp->newdir(CLEANUP => 1);
-    my $tmpdir = $tmpdir_handle->dirname();
 
-    my $conf = get_test_conf($tmpdir, $port);
-    write_text("$tmpdir/influx.conf", $conf);
-
-    # check if influxd is found before forking
-    eval {
-        run_cmd('influxd', 'version');
-    };
-    plan(skip_all => 'influxd not found in PATH') if $@;
-
-    my $pid;
-    defined($pid = fork()) or die "unable to fork: $!\n";
-    if ($pid == 0) {
-        exec("influxd -config $tmpdir/influx.conf");
-        warn "unable to exec 'influxd -config $tmpdir/influx.conf': $!\n";
-        exit 1;
-    }
-    sleep 1; # wait for influxdb to start
+    my ($pid, $tmpdir_handle) = start_db();
 
     # empty config
     is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), ''         => 'Empty config';
@@ -96,7 +84,6 @@ sub test {
     # don't execute a delete action be default - return exit code 1 when some changes are not applied
     is run_updater($curdir, "$schemas_dir/test07", $port, 1), "[!] skipped: delete continuous query cq2 on database test\n"               => "Don't execute delete statements without --force";
     
-
     run_updater($curdir, "$schemas_dir/test07", $port, 0, '--force');
     is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), ''         => 'CQ is deleted with --force';
 
@@ -110,22 +97,76 @@ sub test {
     run_updater($curdir, "$schemas_dir/test00", $port, 1);
     is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), "-- DROP CONTINUOUS QUERY cq1 ON test;\n-- DROP DATABASE test;\n"
                                                                                 => 'Database is not deleted without --force';
+    
     run_updater($curdir, "$schemas_dir/test00", $port, 0, '--force');
     is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), ''         => 'Database is deleted with --force';
 
+    
     # Exit with error when a database is created a second time
     run_updater($curdir, "$schemas_dir/test10", $port, 255, '--diff');
-  
-    is run_updater($curdir, "$schemas_dir/test12", $port, 0, '--diff'), ''         => 'Comments are ignored';
-
-    is run_updater($curdir, "$schemas_dir/test13", $port, 0, '--diff'), "CREATE DATABASE test1;\nCREATE DATABASE test2;\nCREATE DATABASE test3;\n"      => 'Multiple config files are handled properly';
  
+    ($pid, $tmpdir_handle) = restart_db($pid);
+    is run_updater($curdir, "$schemas_dir/test12", $port, 0, '--diff'), ''         => 'Comments are ignored';
+    
+    is run_updater($curdir, "$schemas_dir/test13", $port, 0, '--diff'), "CREATE DATABASE test1;\nCREATE DATABASE test2;\nCREATE DATABASE test3;\n"      => 'Multiple config files are handled properly';
+    
     run_updater($curdir, "$schemas_dir/test02", $port, 0);
     is run_updater($curdir, "$schemas_dir/test02", $port, 0, '--diff'), ''         => 'Running the updater a second time for the same config does nothing (regression LAKE-338)';
     
+
     done_testing();
 
     kill 'KILL', $pid;
+}
+
+
+#
+# Starts an InfluxDB instance, used to run the tests against it.
+#
+# Arguments:
+#     -
+#
+# Returns:
+#     $pid int: the pid of the InfluxDB process started
+#     $tmpdir_handle: a file handle pointing to a tmp directory where the DB config file is saved.
+#     This is returned to make sure that there is always a reference to it, otherwise the GC might delete it.
+#
+sub start_db {
+    my $tmpdir_handle = File::Temp->newdir(CLEANUP => 1);
+    my $tmpdir = $tmpdir_handle->dirname();
+    my $conf = get_test_conf($tmpdir, $port);
+    write_text("$tmpdir/influx.conf", $conf);
+
+    my $pid;
+    defined($pid = fork()) or die "unable to fork: $!\n";
+    if ($pid == 0) {
+        exec("influxd -config $tmpdir/influx.conf");
+        warn "unable to exec 'influxd -config $tmpdir/influx.conf': $!\n";
+        exit 1;
+    }
+
+    sleep 1; # wait for influxdb to start
+    return ($pid, $tmpdir_handle);
+}
+
+
+#
+# Kills the running InfluxDB instance and start a new. In this way a test can start with a clean state of InfluxDB.
+# Note that the pid must be updated in the caller, so that it can be killed when the tests are finished (i.e. the pid returned from this function)
+#
+# Arguments:
+#     $old_pid int: the pid of the currently running InfluxDB
+# 
+# Returns:
+#     $pid int: the pid of the new InfluxDB
+#     $tmpdir_handle: the file handler for the Influx config directory. We return it so that the file has always a reference to it, otherwise GC might delete it.
+#
+sub restart_db {
+    my ($old_pid) = @_;
+
+    kill 'KILL', $old_pid;
+    my ($pid, $tmpdir_handle) = start_db();
+    return ($pid, $tmpdir_handle);
 }
 
 
