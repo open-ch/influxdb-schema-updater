@@ -235,7 +235,7 @@ sub extract_retention_policy_updates {
             object => 'rp',
             db => $db,
             name => $rp,
-            query => "CREATE RETENTION POLICY \"$rp\" ON $db DURATION $rps_in_config->{$rp}->{duration} REPLICATION 1 SHARD DURATION $rps_in_config->{$rp}->{shard_duration}" . ($rps_in_config->{$rp}->{default} ? ' DEFAULT;' : ';'),
+            query => "CREATE RETENTION POLICY \"$rp\" ON $db DURATION $rps_in_config->{$rp}->{duration} REPLICATION $rps_in_config->{$rp}->{rp_replication} SHARD DURATION $rps_in_config->{$rp}->{shard_duration}" . ($rps_in_config->{$rp}->{default} ? ' DEFAULT;' : ';'),
             skip => $dryrun,
         };
     }
@@ -421,36 +421,35 @@ sub load_db_schemas_in_config {
 #
 sub parse_statements {
     my ($string_to_parse) = @_;
+    # we want to iterate line-by-line
     my @splitted_lines = split "\n", $string_to_parse;
     my %parsed_statements;
 
     # captures a 'create database' statement with an optional retention policy definition
-    my $db_regex = qr/^\s*(create \s+ database \s+ (\w+))              # a create db statement, optionally starting with a space. Any valid word as db name. Captured group.
+    my $db_regex = qr/^\s*(create \s+ database \s+ (\w+))             # a create db statement, optionally starting with a space. Any valid word as db name. Captured group.
                      (
-		                 \s+ with \s+ duration                         # optional statement to define a retention policy in the db creation statement
-		                 \s+ ((?:\d+[smhdw])|(?:inf)) \s+ [\w ]*?      # captured policy duration as one or more numbers followed by a letter, or 'inf'
-		                 \s+ shard \s+ duration \s+ "?(\d+[smhdw])"?   # captured shard duration, as above
-		                 \s+ name \s+ "?([\w.]+)"?                     # captured policy name as one or more word letters or dots, optionally enclosed in double quotes.
+		                 \s+ with \s+ duration                        # optional statement to define a retention policy in the db creation statement
+		                 \s+ ((?:\d+[smhdw])|(?:inf))                 # captured policy duration as one or more numbers followed by a letter, or 'inf'
+                         \s+ replication \s+ (\d+)                    # captured policy replication
+		                 \s+ shard \s+ duration \s+ "?(\d+[smhdw])"?  # captured shard duration, as above
+		                 \s+ name \s+ "?([\w.]+)"?                    # captured policy name as one or more word letters or dots, optionally enclosed in double quotes.
                      )?
-                     \s*;?\s*$                                         # end of line
-		           /xim;                                               # case insensitive, multiline (to make the anchors work)
+                     \s*;?\s*$                                        # optional semilocon and end of line
+		           /xi;
 
     # captures a 'create retention policy' definition statement
     my $rp_regex = qr/^\s*create \s+ retention \s+ policy
-		             \s+ "?([\w.]+)"?                               # any string containing word chars or '.', optionally enclosed in double quotes
+		             \s+ "?([\w.]+)"?                                 # any string containing word chars or '.', optionally enclosed in double quotes
 		             \s+ on \s+ (\w+)
-		             \s+ duration \s+ ((?:\d+[smhdw])|(?:inf))      # policy duration: either one or more numbers followed by a letter in the brackets, or 'inf'. Capture only the enclosing group.
-		             \s+ replication \s+ \d+ \s+ shard \s+ duration # TODO: capture replication
-		             \s+ "?(\d+[smhdw])"?                           # shard duration: one or more numbers followed by a letter in the brackets, optionally enclosed in double quotes
-		             (\s+ default)?                                 # default retention policy: optional 'default' value.
-                     \s*;?\s*$                                      # end of line
-		           /xim;                                            # case insensitive, multiline (to make the anchors work)
+		             \s+ duration \s+ ((?:\d+[smhdw])|(?:inf))        # policy duration: either one or more numbers followed by a letter in the brackets, or 'inf'. Capture only the enclosing group.
+		             \s+ replication \s+ (\d+) \s+ shard \s+ duration # capture policy replication
+		             \s+ "?(\d+[smhdw])"?                             # shard duration: one or more numbers followed by a letter in the brackets, optionally enclosed in double quotes
+		             (\s+ default)?                                   # default retention policy: optional 'default' value
+                     \s*;?\s*$                                        # optional semilocon and end of line
+		           /xi;
 
     # a line in the file can be a database creation or retention policy creation
     my $integrated_regex = qr/$db_regex|$rp_regex/;
-
-    # strip multiple space characters to a single space
-    $string_to_parse =~ s/ +/ /g;
 
     # parse each matching line in a loop
     for my $line (@splitted_lines) {
@@ -463,13 +462,15 @@ sub parse_statements {
             my $db_name = $2;
             my $inline_rp_statement = $3;
             my $inline_rp_duration = $4;
-            my $inline_rp_shard_duration = $5;
-            my $inline_rp_name = $6;
-            my $rp_name = $7;
-            my $rp_db_name = $8;
-            my $rp_duration = $9;
-            my $rp_shard_duration = $10;
-            my $default_rp = $11 ? 1 : 0;
+            my $inline_rp_replication = $5;
+            my $inline_rp_shard_duration = $6;
+            my $inline_rp_name = $7;
+            my $rp_name = $8;
+            my $rp_db_name = $9;
+            my $rp_duration = $10;
+            my $rp_replication = $11;
+            my $rp_shard_duration = $12;
+            my $default_rp = $13 ? 1 : 0;
 
             # the line is a 'create database' statement...
             if ($create_db_statement) {
@@ -480,6 +481,7 @@ sub parse_statements {
                     # flagged as the default policy (assume that the inline policy is the default)
                     $parsed_statements{$db_name}{rps}{$inline_rp_name} = {duration       => $inline_rp_duration,
                                                                           shard_duration => $inline_rp_shard_duration,
+                                                                          rp_replication => $inline_rp_replication,
                                                                           default        => 1};
                 }
             }
@@ -487,6 +489,7 @@ sub parse_statements {
             elsif ($rp_name) {
                 $parsed_statements{$rp_db_name}{rps}{$rp_name} = {duration       => $rp_duration,
                                                                   shard_duration => $rp_shard_duration,
+                                                                  rp_replication => $rp_replication,
                                                                   default        => $default_rp}
             }
             else {
