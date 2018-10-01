@@ -17,8 +17,6 @@ use 5.010;
 use strict;
 use warnings;
 
-use lib '/opt/OSAGinfluxdb/lib';
-
 use InfluxDB::HTTP;
 use Getopt::Long;
 use Pod::Usage qw(pod2usage);
@@ -428,25 +426,25 @@ sub parse_statements {
     # captures a 'create database' statement with an optional retention policy definition
     my $db_regex = qr/^\s*(create \s+ database \s+ (\w+))             # a create db statement, optionally starting with a space. Any valid word as db name. Captured group.
                      (
-		                 \s+ with \s+ duration                        # optional statement to define a retention policy in the db creation statement
-		                 \s+ ((?:\d+[smhdw])|(?:inf))                 # captured policy duration as one or more numbers followed by a letter, or 'inf'
+                         \s+ with \s+ duration                        # optional statement to define a retention policy in the db creation statement
+                         \s+ ((?:\d+[smhdw])|(?:inf))                 # captured policy duration as one or more numbers followed by a letter, or 'inf'
                          \s+ replication \s+ (\d+)                    # captured policy replication
-		                 \s+ shard \s+ duration \s+ "?(\d+[smhdw])"?  # captured shard duration, as above
-		                 \s+ name \s+ "?([\w.]+)"?                    # captured policy name as one or more word letters or dots, optionally enclosed in double quotes.
+                         \s+ shard \s+ duration \s+ "?(\d+[smhdw])"?  # captured shard duration, as above
+                         \s+ name \s+ "?([\w.]+)"?                    # captured policy name as one or more word letters or dots, optionally enclosed in double quotes.
                      )?
                      \s*;?\s*$                                        # optional semilocon and end of line
 		           /xi;
 
     # captures a 'create retention policy' definition statement
     my $rp_regex = qr/^\s*create \s+ retention \s+ policy
-		             \s+ "?([\w.]+)"?                                 # any string containing word chars or '.', optionally enclosed in double quotes
-		             \s+ on \s+ (\w+)
-		             \s+ duration \s+ ((?:\d+[smhdw])|(?:inf))        # policy duration: either one or more numbers followed by a letter in the brackets, or 'inf'. Capture only the enclosing group.
-		             \s+ replication \s+ (\d+) \s+ shard \s+ duration # capture policy replication
-		             \s+ "?(\d+[smhdw])"?                             # shard duration: one or more numbers followed by a letter in the brackets, optionally enclosed in double quotes
-		             (\s+ default)?                                   # default retention policy: optional 'default' value
+                     \s+ "?([\w.]+)"?                                 # any string containing word chars or '.', optionally enclosed in double quotes
+                     \s+ on \s+ (\w+)
+                     \s+ duration \s+ ((?:\d+[smhdw])|(?:inf))        # policy duration: either one or more numbers followed by a letter in the brackets, or 'inf'. Capture only the enclosing group.
+                     \s+ replication \s+ (\d+) \s+ shard \s+ duration # capture policy replication
+                     \s+ "?(\d+[smhdw])"?                             # shard duration: one or more numbers followed by a letter in the brackets, optionally enclosed in double quotes
+                     (\s+ default)?                                   # default retention policy: optional 'default' value
                      \s*;?\s*$                                        # optional semilocon and end of line
-		           /xi;
+                   /xi;
 
     # a line in the file can be a database creation or retention policy creation
     my $integrated_regex = qr/$db_regex|$rp_regex/;
@@ -517,7 +515,7 @@ sub check_if_db_statement_exists_and_die {
     my ($parsed_statements, $db_name) = @_;
     
     # there should be no 'create database' statement yet for this database
-    if (exists $parsed_statements->{$db_name}{create_query}) {
+    if ($parsed_statements->{$db_name}{create_query}) {
         die "Create statement already defined for database $db_name. Fix the config file";
     }
 }
