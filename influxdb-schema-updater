@@ -146,7 +146,7 @@ sub extract_database_updates {
     my ($db_schemas_in_influxdb, $db_schemas_in_config, $dryrun, $force) = @_;
 
     my ($old_dbs, $eq_dbs, $new_dbs) = get_Ldifference_intersection_Rdifference([keys %{$db_schemas_in_influxdb}], [keys %{$db_schemas_in_config}]);
-    
+
     my %rp_updates;
     for my $db (@$eq_dbs, @$new_dbs) {
         my ($old, $updated, $new) = extract_retention_policy_updates($db, $db_schemas_in_influxdb->{$db}, $db_schemas_in_config->{$db}->{rps}, $dryrun, $force);
@@ -276,7 +276,7 @@ sub extract_continuous_query_updates {
                 object => 'cq',
                 db => $db,
                 name => $cq,
-                query => "DROP CONTINUOUS QUERY $cq ON $db;",
+                query => qq{DROP CONTINUOUS QUERY "$cq" ON "$db";},
                 skip => $dryrun || !$force,
             };
         }
@@ -287,7 +287,7 @@ sub extract_continuous_query_updates {
                     object => 'cq',
                     db => $db,
                     name => $cq,
-                    query => "DROP CONTINUOUS QUERY $cq ON $db; $all_cqs_in_config->{$db}->{$cq};",
+                    query => qq{DROP CONTINUOUS QUERY "$cq" ON "$db"; $all_cqs_in_config->{$db}->{$cq};},
                     skip => $dryrun,
                 };
             }
@@ -392,11 +392,11 @@ sub load_db_schemas_in_config {
     # this will be populated with all statements parsed from the files
     my %parsed_statements;
     my $db_files = get_schema_files_for_dir("$schema_dir/db");
-    
+
     for my $db_file (@$db_files) {
         my $statements_in_file = read_text("$schema_dir/db/$db_file");
         my $parsed_statements_from_file = parse_statements($statements_in_file);
-        
+
         # add the statements from this file to the initial hash
         %parsed_statements = (%parsed_statements, %$parsed_statements_from_file);
     }
@@ -453,7 +453,7 @@ sub parse_statements {
     for my $line (@splitted_lines) {
         # ignore empty and commented lines
         next if $line =~ /^\s*(#.*)?$/;
-        
+
         if ($line =~ /$integrated_regex/) {
             # capture groups from the regex
             my $create_db_statement = $1;
@@ -507,13 +507,13 @@ sub parse_statements {
 #
 #  Arguments:
 #      $parsed_statements reference: a reference to the hash containing the db statements
-#      $db_name string: 
+#      $db_name string:
 #  Returns:
 #      -
 #
 sub check_if_db_statement_exists_and_die {
     my ($parsed_statements, $db_name) = @_;
-    
+
     # there should be no 'create database' statement yet for this database
     if ($parsed_statements->{$db_name}{create_query}) {
         die "Create statement already defined for database $db_name. Fix the config file";
