@@ -65,7 +65,7 @@ sub test {
     is run_updater($curdir, "$schemas_dir/test05", $port, 0, '--diff'), ''         => 'CQs are added';
 
     # change a continuous query
-    is run_updater($curdir, "$schemas_dir/test06", $port, 0, '--diff'), qq{DROP CONTINUOUS QUERY "cq2" ON test; CREATE CONTINUOUS QUERY cq2 ON test RESAMPLE EVERY 5m FOR 10m BEGIN SELECT MAX(a) AS b, c INTO test.rp2.m FROM test.rp1.m GROUP BY time(5m) END;\n}
+    is run_updater($curdir, "$schemas_dir/test06", $port, 0, '--diff'), qq{DROP CONTINUOUS QUERY "cq2" ON "test"; CREATE CONTINUOUS QUERY cq2 ON test RESAMPLE EVERY 5m FOR 10m BEGIN SELECT MAX(a) AS b, c INTO test.rp2.m FROM test.rp1.m GROUP BY time(5m) END;\n}
                                                                                 => 'CQ change is detected';
     run_updater($curdir, "$schemas_dir/test06", $port, 0);
     is run_updater($curdir, "$schemas_dir/test06", $port, 0, '--diff'), ''         => 'CQ is updated';
@@ -76,10 +76,10 @@ sub test {
     run_updater($curdir, "$schemas_dir/test06", $port, 0, '--force'); # reset
 
     # remove a continuous query
-    is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq2" ON test;\n}
+    is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq2" ON "test";\n}
                                                                                 => 'CQ removal is detected';
     run_updater($curdir, "$schemas_dir/test07", $port, 1);
-    is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq2" ON test;\n}
+    is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq2" ON "test";\n}
                                                                                 => 'CQ is not deleted without --force';
     # don't execute a delete action be default - return exit code 1 when some changes are not applied
     is run_updater($curdir, "$schemas_dir/test07", $port, 1), "[!] skipped: delete continuous query cq2 on database test\n"               => "Don't execute delete statements without --force";
@@ -88,14 +88,14 @@ sub test {
     is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), ''         => 'CQ is deleted with --force';
 
     # test the order of updates
-    is run_updater($curdir, "$schemas_dir/test08", $port, 0, '--diff', '--force'), qq{DROP CONTINUOUS QUERY "cq1" ON test;\nDROP DATABASE test;\nCREATE DATABASE test2;\nCREATE RETENTION POLICY \"rp1\" ON test2 DURATION 100d REPLICATION 1 SHARD DURATION 2w;\nCREATE RETENTION POLICY \"rp2\" ON test2 DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\nCREATE CONTINUOUS QUERY cq1 ON test2 RESAMPLE EVERY 5m FOR 10m BEGIN SELECT LAST(a) AS b, c INTO test2.rp2.m FROM test2.rp1.m GROUP BY time(5m) END;\n}
+    is run_updater($curdir, "$schemas_dir/test08", $port, 0, '--diff', '--force'), qq{DROP CONTINUOUS QUERY "cq1" ON "test";\nDROP DATABASE test;\nCREATE DATABASE test2;\nCREATE RETENTION POLICY \"rp1\" ON test2 DURATION 100d REPLICATION 1 SHARD DURATION 2w;\nCREATE RETENTION POLICY \"rp2\" ON test2 DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\nCREATE CONTINUOUS QUERY cq1 ON test2 RESAMPLE EVERY 5m FOR 10m BEGIN SELECT LAST(a) AS b, c INTO test2.rp2.m FROM test2.rp1.m GROUP BY time(5m) END;\n}
 
                                                                                 => 'Updates applied in the right order';
 
-    is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq1" ON test;\n-- DROP DATABASE test;\n}
+    is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq1" ON "test";\n-- DROP DATABASE test;\n}
                                                                                 => 'Old database is detected';
     run_updater($curdir, "$schemas_dir/test00", $port, 1);
-    is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq1" ON test;\n-- DROP DATABASE test;\n}
+    is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq1" ON "test";\n-- DROP DATABASE test;\n}
                                                                                 => 'Database is not deleted without --force';
 
     run_updater($curdir, "$schemas_dir/test00", $port, 0, '--force');
