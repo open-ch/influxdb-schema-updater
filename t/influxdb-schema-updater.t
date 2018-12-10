@@ -116,9 +116,9 @@ sub test {
     # Test for handling of name with dots (bugfix while working on MON-2086)
     ($pid, $tmpdir_handle) = restart_db($pid);
     is run_updater($curdir, "$schemas_dir/test_name_with_dot", $port, 0, '--diff'), qq{CREATE DATABASE "db.test";\nCREATE RETENTION POLICY "rp.test" ON "db.test" DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\n}
-                                                                                => 'CQ change is detected';
+                                                                                => 'Detect changes with dot in the names.';
     run_updater($curdir, "$schemas_dir/test_name_with_dot", $port, 0);
-    is run_updater($curdir, "$schemas_dir/test_name_with_dot", $port, 0, '--diff'), ''         => 'CQ is updated';
+    is run_updater($curdir, "$schemas_dir/test_name_with_dot", $port, 0, '--diff'), ''         => 'Applied changes with dot in the names';
 
 
     done_testing();

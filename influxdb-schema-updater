@@ -369,11 +369,11 @@ sub load_db_schemas_in_influxdb {
 #     $schema_dir string: the directory name where the config files are
 #
 # Returns:
-#     a reference to a hash holding the parsed statements. This hash is structured as below.
-# TODO: fix indentation
+#     $db_schemas: a reference to a hash holding the parsed statements. This hash is structured as below.
+#
 # {
-#     <db name> => {
-#         <rp name> => {
+#     <db> => {
+#         <rp> => {
 #                 duration => ...,
 #                 shard_duration => ...,
 #                 default => ...,
@@ -387,39 +387,37 @@ sub load_db_schemas_in_influxdb {
 sub load_db_schemas_in_config {
     my ($schema_dir) = @_;
 
-    # this will be populated with all statements parsed from the files
-    my %parsed_statements;
+    my %db_schemas;
     my $db_files = get_schema_files_for_dir("$schema_dir/db");
 
     for my $db_file (@$db_files) {
         my $statements_in_file = read_text("$schema_dir/db/$db_file");
-        #my $parsed_statements_from_file = parse_statements($statements_in_file);
         my ($databases, $rps) = parse_statements($statements_in_file);
 
-        # add the statements from this file to the initial hash
-        # TODO: merge database list and rp list to create a hash which only contains each database and each rp policy once
-        # TODO: hash: database name -> rp name ->
-
+        # loop all the databases and add them to the hash
         for my $db (@$databases) {
-            if (exists $parsed_statements{$db}) {
+            # make sure every database is only created once
+            if (exists $db_schemas{$db}) {
                 die "duplicate database $db in file $db_file detected\n";
             }
-            $parsed_statements{$db} = {};
+            $db_schemas{$db} = {};
         }
+        # loop all the retention policies and assign them to the correct database
         for my $rp (@$rps) {
             my $db = $rp->{database};
-            if (exists $parsed_statements{$db}) {
-                if (exists $parsed_statements{$db}->{$rp->{rp_name}}) {
+            if (exists $db_schemas{$db}) {
+                # make sure every retention policy is only created once
+                if (exists $db_schemas{$db}->{$rp->{rp_name}}) {
                     die "duplicate rp $rp on db $db in file $db_file detected\n";
                 }
-                $parsed_statements{$db}->{$rp->{rp_name}} = $rp;
+                $db_schemas{$db}->{$rp->{rp_name}} = $rp;
             }
             else {
                 die "database $db specified in rp $rp from file $db_file does not exist\n";
             }
         }
     }
-    return \%parsed_statements;
+    return \%db_schemas;
 }
 
 #
@@ -430,13 +428,12 @@ sub load_db_schemas_in_config {
 #
 # Arguments:
 #     $string_to_parse string: the contents of the config file (loaded as string)
-#     $parsed_statements reference: a reference to a hash. The function will populate it with the parsed statements.
 #
 # Returns:
-#     a reference to a hash holding the parsed statements from the file.
+#     $databases: reference to a list which contains all the database names
+#     $rps: reference to a list which contains hashes of all the retention policies
 #
 sub parse_statements {
-    # TODO: should return 2 lists: 1 list of databases and 1 list of retention policies
     my ($string_to_parse) = @_;
     # we want to iterate line-by-line
     my @splitted_lines = split "\n", $string_to_parse;
@@ -492,13 +489,10 @@ sub parse_statements {
 
             # the line is a 'create database' statement...
             if ($create_db_statement) {
-                # TODO: remove: check_if_db_statement_exists_and_die(\%parsed_statements, $db_name);
                 push @databases, $db_name;
-                # $parsed_statements{$db_name}{create_query} = $create_db_statement . ';';
                 # ...and has a retention policy defined inline
                 if ($inline_rp_statement) {
-                    # flagged as the default policy (assume that the inline policy is the default)
-                    #TODO: hash ->  new list
+                    # flagged as the default policy (assume that the inline policy is the default)ƒ
                     push @rps, {
                         database       => $db_name,
                         rp_name        => $inline_rp_name,
@@ -510,7 +504,6 @@ sub parse_statements {
                 }
             }
             # the line is a 'create retention policy' statement
-            # TODO: add to rp list
             elsif ($rp_name) {
                 push @rps, {
                     database       => $rp_db_name,
@@ -531,26 +524,6 @@ sub parse_statements {
     }
     return return \@databases, \@rps;
 }
-
-
-#
-# Checks if the db creation statement is already added in the parsed statements hash. If yes then it throws an exception.
-#
-#  Arguments:
-#      $parsed_statements reference: a reference to the hash containing the db statements
-#      $db_name string:
-#  Returns:
-#      -
-#
-sub check_if_db_statement_exists_and_die {
-    my ($parsed_statements, $db_name) = @_;
-
-    # there should be no 'create database' statement yet for this database
-    if ($parsed_statements->{$db_name}{create_query}) {
-        die "Create statement already defined for database $db_name. Fix the config file";
-    }
-}
-
 
 # {
 #     <db> => {
