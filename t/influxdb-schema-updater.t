@@ -31,27 +31,27 @@ sub test {
     is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), ''         => 'Empty config';
 
     # only database
-    is run_updater($curdir, "$schemas_dir/test01", $port, 0, '--diff'), "CREATE DATABASE test;\n"
+    is run_updater($curdir, "$schemas_dir/test01", $port, 0, '--diff'), qq{CREATE DATABASE "test";\n}
                                                                                 => 'New database is detected';
-    is run_updater($curdir, "$schemas_dir/test01", $port, 0, '--diff'), "CREATE DATABASE test;\n"
+    is run_updater($curdir, "$schemas_dir/test01", $port, 0, '--diff'), qq{CREATE DATABASE "test";\n}
                                                                                 => '--diff mode doesn\'t update InfluxDB';
     run_updater($curdir, "$schemas_dir/test01", $port, 0);
     is run_updater($curdir, "$schemas_dir/test01", $port, 0, '--diff'), ''         => 'Database is added';
 
     # add a retention policy
-    is run_updater($curdir, "$schemas_dir/test02", $port, 0, '--diff'), "CREATE RETENTION POLICY \"rp1\" ON test DURATION 90d REPLICATION 1 SHARD DURATION 2w;\n"
+    is run_updater($curdir, "$schemas_dir/test02", $port, 0, '--diff'), qq{CREATE RETENTION POLICY "rp1" ON "test" DURATION 90d REPLICATION 1 SHARD DURATION 2w;\n}
                                                                                 => 'New RP is detected';
     run_updater($curdir, "$schemas_dir/test02", $port, 0);
     is run_updater($curdir, "$schemas_dir/test02", $port, 0, '--diff'), ''         => 'RP is added';
 
     # change a retention policy
-    is run_updater($curdir, "$schemas_dir/test03", $port, 0, '--diff'), "ALTER RETENTION POLICY \"rp1\" ON test DURATION 100d REPLICATION 1 SHARD DURATION 2w;\n"
+    is run_updater($curdir, "$schemas_dir/test03", $port, 0, '--diff'), qq{ALTER RETENTION POLICY "rp1" ON "test" DURATION 100d REPLICATION 1 SHARD DURATION 2w;\n}
                                                                                 => 'RP change is detected';
     run_updater($curdir, "$schemas_dir/test03", $port, 0);
     is run_updater($curdir, "$schemas_dir/test03", $port, 0, '--diff'), ''         => 'RP is updated';
 
     # create a retention policy on the same line as the database
-    is run_updater($curdir, "$schemas_dir/test04", $port, 0, '--diff'), "CREATE RETENTION POLICY \"rp2\" ON test DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\n"
+    is run_updater($curdir, "$schemas_dir/test04", $port, 0, '--diff'), qq{CREATE RETENTION POLICY "rp2" ON "test" DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\n}
                                                                                 => 'RP on same line as create database is detected';
 
     run_updater($curdir, "$schemas_dir/test04", $port, 0, '--force');
@@ -65,7 +65,7 @@ sub test {
     is run_updater($curdir, "$schemas_dir/test05", $port, 0, '--diff'), ''         => 'CQs are added';
 
     # change a continuous query
-    is run_updater($curdir, "$schemas_dir/test06", $port, 0, '--diff'), "DROP CONTINUOUS QUERY cq2 ON test; CREATE CONTINUOUS QUERY cq2 ON test RESAMPLE EVERY 5m FOR 10m BEGIN SELECT MAX(a) AS b, c INTO test.rp2.m FROM test.rp1.m GROUP BY time(5m) END;\n"
+    is run_updater($curdir, "$schemas_dir/test06", $port, 0, '--diff'), qq{DROP CONTINUOUS QUERY "cq2" ON "test"; CREATE CONTINUOUS QUERY cq2 ON test RESAMPLE EVERY 5m FOR 10m BEGIN SELECT MAX(a) AS b, c INTO test.rp2.m FROM test.rp1.m GROUP BY time(5m) END;\n}
                                                                                 => 'CQ change is detected';
     run_updater($curdir, "$schemas_dir/test06", $port, 0);
     is run_updater($curdir, "$schemas_dir/test06", $port, 0, '--diff'), ''         => 'CQ is updated';
@@ -76,43 +76,50 @@ sub test {
     run_updater($curdir, "$schemas_dir/test06", $port, 0, '--force'); # reset
 
     # remove a continuous query
-    is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), "-- DROP CONTINUOUS QUERY cq2 ON test;\n"
+    is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq2" ON "test";\n}
                                                                                 => 'CQ removal is detected';
     run_updater($curdir, "$schemas_dir/test07", $port, 1);
-    is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), "-- DROP CONTINUOUS QUERY cq2 ON test;\n"
+    is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq2" ON "test";\n}
                                                                                 => 'CQ is not deleted without --force';
     # don't execute a delete action be default - return exit code 1 when some changes are not applied
     is run_updater($curdir, "$schemas_dir/test07", $port, 1), "[!] skipped: delete continuous query cq2 on database test\n"               => "Don't execute delete statements without --force";
-    
+
     run_updater($curdir, "$schemas_dir/test07", $port, 0, '--force');
     is run_updater($curdir, "$schemas_dir/test07", $port, 0, '--diff'), ''         => 'CQ is deleted with --force';
 
     # test the order of updates
-    is run_updater($curdir, "$schemas_dir/test08", $port, 0, '--diff', '--force'), "DROP CONTINUOUS QUERY cq1 ON test;\nDROP DATABASE test;\nCREATE DATABASE test2;\nCREATE RETENTION POLICY \"rp1\" ON test2 DURATION 100d REPLICATION 1 SHARD DURATION 2w;\nCREATE RETENTION POLICY \"rp2\" ON test2 DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\nCREATE CONTINUOUS QUERY cq1 ON test2 RESAMPLE EVERY 5m FOR 10m BEGIN SELECT LAST(a) AS b, c INTO test2.rp2.m FROM test2.rp1.m GROUP BY time(5m) END;\n"
+    is run_updater($curdir, "$schemas_dir/test08", $port, 0, '--diff', '--force'), qq{DROP CONTINUOUS QUERY "cq1" ON "test";\nDROP DATABASE "test";\nCREATE DATABASE "test2";\nCREATE RETENTION POLICY "rp1" ON "test2" DURATION 100d REPLICATION 1 SHARD DURATION 2w;\nCREATE RETENTION POLICY "rp2" ON "test2" DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\nCREATE CONTINUOUS QUERY cq1 ON test2 RESAMPLE EVERY 5m FOR 10m BEGIN SELECT LAST(a) AS b, c INTO test2.rp2.m FROM test2.rp1.m GROUP BY time(5m) END;\n}
 
                                                                                 => 'Updates applied in the right order';
 
-    is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), "-- DROP CONTINUOUS QUERY cq1 ON test;\n-- DROP DATABASE test;\n"
+    is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq1" ON "test";\n-- DROP DATABASE "test";\n}
                                                                                 => 'Old database is detected';
     run_updater($curdir, "$schemas_dir/test00", $port, 1);
-    is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), "-- DROP CONTINUOUS QUERY cq1 ON test;\n-- DROP DATABASE test;\n"
+    is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), qq{-- DROP CONTINUOUS QUERY "cq1" ON "test";\n-- DROP DATABASE "test";\n}
                                                                                 => 'Database is not deleted without --force';
-    
+
     run_updater($curdir, "$schemas_dir/test00", $port, 0, '--force');
     is run_updater($curdir, "$schemas_dir/test00", $port, 0, '--diff'), ''         => 'Database is deleted with --force';
 
-    
+
     # Exit with error when a database is created a second time
     run_updater($curdir, "$schemas_dir/test10", $port, 255, '--diff');
- 
+
     ($pid, $tmpdir_handle) = restart_db($pid);
     is run_updater($curdir, "$schemas_dir/test12", $port, 0, '--diff'), ''         => 'Comments are ignored';
-    
-    is run_updater($curdir, "$schemas_dir/test13", $port, 0, '--diff'), "CREATE DATABASE test1;\nCREATE DATABASE test2;\nCREATE DATABASE test3;\n"      => 'Multiple config files are handled properly';
-    
+
+    is run_updater($curdir, "$schemas_dir/test13", $port, 0, '--diff'), qq{CREATE DATABASE "test1";\nCREATE DATABASE "test2";\nCREATE DATABASE "test3";\n}      => 'Multiple config files are handled properly';
+
     run_updater($curdir, "$schemas_dir/test02", $port, 0);
     is run_updater($curdir, "$schemas_dir/test02", $port, 0, '--diff'), ''         => 'Running the updater a second time for the same config does nothing (regression LAKE-338)';
-    
+
+    # Test for handling of name with dots (bugfix while working on MON-2086)
+    ($pid, $tmpdir_handle) = restart_db($pid);
+    is run_updater($curdir, "$schemas_dir/test_name_with_dot", $port, 0, '--diff'), qq{CREATE DATABASE "db.test";\nCREATE RETENTION POLICY "rp.test" ON "db.test" DURATION 260w REPLICATION 1 SHARD DURATION 12w DEFAULT;\n}
+                                                                                => 'Detect changes with dot in the names.';
+    run_updater($curdir, "$schemas_dir/test_name_with_dot", $port, 0);
+    is run_updater($curdir, "$schemas_dir/test_name_with_dot", $port, 0, '--diff'), ''         => 'Applied changes with dot in the names';
+
 
     done_testing();
 
@@ -156,7 +163,7 @@ sub start_db {
 #
 # Arguments:
 #     $old_pid int: the pid of the currently running InfluxDB
-# 
+#
 # Returns:
 #     $pid int: the pid of the new InfluxDB
 #     $tmpdir_handle: the file handler for the Influx config directory. We return it so that the file has always a reference to it, otherwise GC might delete it.
@@ -188,7 +195,7 @@ sub run_updater {
     my @cmd = ("$curdir/../influxdb-schema-updater", '--config', $schema_dir, '--url', "localhost:$port", @flags);
     my $output = run_cmd(@cmd);
     is $? >> 8, $exit_code, "expected exit code for @cmd";
-    
+
     return $output
 
 }

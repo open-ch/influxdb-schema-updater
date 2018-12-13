@@ -1,0 +1,2 @@
+CREATE CONTINUOUS QUERY "cq.test" ON "db.test" RESAMPLE EVERY 5m FOR 10m BEGIN SELECT LAST(a) AS b, c INTO "rp.test"."m.test" FROM "rp.test"."m.test" GROUP BY time(5m) END;
+
