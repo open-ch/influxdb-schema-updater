@@ -152,7 +152,7 @@ sub start_db {
         exit 1;
     }
 
-    sleep 1; # wait for influxdb to start
+    sleep 5; # wait for influxdb to start
     return ($pid, $tmpdir_handle);
 }
 
